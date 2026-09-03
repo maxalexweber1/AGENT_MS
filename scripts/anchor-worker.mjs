@@ -131,6 +131,16 @@ export async function drain() {
       if (n >= 80) { log("worker: 80 items in one run - stopping, will be re-kicked"); break; }
     }
     log(`worker done (${n} item${n === 1 ? "" : "s"})`);
+    // keep the public ledger fresh: regenerate after every drained batch
+    if (n > 0) {
+      try {
+        const { execFileSync } = await import("node:child_process");
+        const { scriptsDir } = await import("./lib/mc.mjs");
+        const path = await import("node:path");
+        execFileSync(process.execPath, [path.join(scriptsDir, "dashboard.mjs")], { stdio: "ignore" });
+        log("dashboard refreshed");
+      } catch (e) { log("dashboard refresh failed:", e.message); }
+    }
   } finally {
     ng.releaseLock();
     await ng.closeBuilder();

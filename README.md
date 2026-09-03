@@ -102,9 +102,7 @@ Requirements:
   `NIGHTGATE_*` env values, every proof feature is a clean no-op and M₳X is
   just a well-behaved game agent.
 - A **Midnight City** account + observer API token (`MCITY_API_TOKEN`).
-- For proofs: a **NIGHTGATE agent grant** (`NIGHTGATE_TOKEN`, ask the operator
-  of a NIGHTGATE instance), a pinned sponsor session id, and a fresh 128-hex
-  seed as the agent's attester identity — it needs no funds.
+- For proofs: a **NIGHTGATE agent grant** (`NIGHTGATE_TOKEN`, open a [ISSUE](https://github.com/ODATANO/NIGHTGATE/issues) in the nightgate repository and im happy to give you one)
 - Optional: an **Anthropic API key** for LLM conversations (with a hard daily
   budget); the rule engine covers everything without one.
 
