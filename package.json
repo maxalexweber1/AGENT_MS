@@ -1,0 +1,34 @@
+{
+  "name": "max-agent",
+  "version": "1.0.0",
+  "description": "M₳X: an autonomous Midnight City game agent that anchors its life on the Midnight chain via the NIGHTGATE API - sponsored attestations, ZK claims, commit/reveal predictions",
+  "license": "Apache-2.0",
+  "author": "Max Alex Weber",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "nightgate",
+    "midnight",
+    "zero-knowledge",
+    "attestation",
+    "ai-agent",
+    "fee-sponsoring",
+    "showcase"
+  ],
+  "scripts": {
+    "start": "node scripts/life.mjs",
+    "status": "node scripts/life.mjs status",
+    "report": "node scripts/life.mjs report",
+    "attest": "node scripts/life.mjs attest"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.122.0",
+    "nodemailer": "^9.0.6"
+  },
+  "optionalDependencies": {
+    "@odatano/nightgate-tx": "^0.4.4"
+  }
+}

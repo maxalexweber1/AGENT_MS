@@ -1,0 +1,21 @@
+# secrets & local operator notes
+.env
+OPERATIONS.local.md
+CLAUDE.md
+
+# runtime state (agent memory, attestation log, doc-proof witnesses, prediction nonces)
+data/
+reports/
+scripts/.responder-memory.json
+
+# logs from live runs (contain in-game conversations)
+*.log
+
+# local scratch & one-shot ops scripts (not needed to run the agent)
+docproof-sample.json
+image.png
+scripts/deploy-vault.mjs
+scripts/backfill-txhash.mjs
+scripts/run-forever.cmd
+
+node_modules/

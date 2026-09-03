@@ -1,0 +1,20 @@
+services:
+  max:
+    build: .
+    container_name: max-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Europe/Berlin
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - lease:/root/.midnight-city
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  lease:
