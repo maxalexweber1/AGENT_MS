@@ -74,8 +74,12 @@ async function daily() {
   if (!fs.existsSync(file)) throw new Error(`report file not found: ${file}`);
   const date = today();
 
-  // 1. structured document over the day's numbers + the rendered report's hash
-  const d = report.collect(24 * 3600_000);
+  // 1. structured document over the day's numbers + the rendered report's hash.
+  // The window ends when the report file was written, so a re-run (or a late
+  // child) reproduces the report's numbers instead of a shifted window.
+  const endMs = Math.min(fs.statSync(file).mtimeMs, Date.now());
+  const d = report.collect(24 * 3600_000, endMs);
+  if (!d.events) throw new Error(`journal has no events in the report window (ending ${new Date(endMs).toISOString()}) - refusing to anchor an all-zero document`);
   const document = {
     date, agentId: ng.AGENT_ID,
     crystal: d.crystalEnd ?? 0,

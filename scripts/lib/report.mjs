@@ -16,10 +16,10 @@ const reportsDir = path.join(rootDir, "reports");
 const fmtTime = (ms) => new Date(ms).toTimeString().slice(0, 5);
 const fmtDur = (ms) => (ms < 3600_000 ? `${Math.round(ms / 60000)} min` : `${(ms / 3600_000).toFixed(1)} h`);
 
-/** Collect the numbers for a window ending now. */
-export function collect(windowMs = 24 * 3600_000) {
-  const from = Date.now() - windowMs;
-  const ev = journal.since(from);
+/** Collect the numbers for a window ending at `endMs` (default: now). */
+export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
+  const from = endMs - windowMs;
+  const ev = journal.since(from).filter((e) => e.at <= endMs);
   const by = (t) => ev.filter((e) => e.type === t);
 
   const batches = by("batch");
@@ -41,7 +41,7 @@ export function collect(windowMs = 24 * 3600_000) {
   const modes = by("mode").sort((a, b) => a.at - b.at);
   const modeTime = {};
   for (let i = 0; i < modes.length; i++) {
-    const end = modes[i + 1]?.at ?? Date.now();
+    const end = modes[i + 1]?.at ?? endMs;
     modeTime[modes[i].mode] = (modeTime[modes[i].mode] || 0) + (end - modes[i].at);
   }
   const people = new Map();
@@ -55,7 +55,7 @@ export function collect(windowMs = 24 * 3600_000) {
   }
   const l = llm.status();
   return {
-    from, to: Date.now(), windowMs,
+    from, to: endMs, windowMs, events: ev.length,
     batches: batches.length, coinsSold, crystalFromCoins, crystalStart, crystalEnd,
     meals: meals.length, crystalForFood,
     replies: replies.length, openers: openers.length, shouts: shouts.length,
@@ -229,6 +229,9 @@ export async function generate({ windowMs = 24 * 3600_000, notify = true } = {})
   const file = path.join(reportsDir, `${new Date().toISOString().slice(0, 10)}.md`);
   fs.writeFileSync(file, text + "\n");
   fs.writeFileSync(path.join(dataDir, "last-report.md"), text + "\n");
+  // compact BEFORE the proof child starts - it re-reads the journal for this window
+  // (a compaction racing the child once produced an all-zero anchored document)
+  journal.compact();
   // real proof, not vibes: anchor the report on Midnight (detached child, no-op unless configured)
   if (notify) nightgate.attestReportAsync(file);
   if (notify) {
@@ -239,7 +242,6 @@ export async function generate({ windowMs = 24 * 3600_000, notify = true } = {})
     await webhook(subject, text);
     await email(subject, text);
   }
-  journal.compact();
   log(`report written: ${file}`);
   return { file, text };
 }

@@ -31,10 +31,16 @@ export function since(sinceMs) {
   }
 }
 
-/** Drop entries older than `keepMs` (default 14 days) to keep the file small. */
+/**
+ * Drop entries older than `keepMs` (default 14 days) to keep the file small.
+ * Atomic (tmp + rename): a concurrent reader (e.g. the attest-report child)
+ * sees either the old or the new file, never a truncated one.
+ */
 export function compact(keepMs = 14 * 24 * 3600_000) {
   try {
     const keep = since(Date.now() - keepMs);
-    fs.writeFileSync(file, keep.map((e) => JSON.stringify(e)).join("\n") + (keep.length ? "\n" : ""));
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, keep.map((e) => JSON.stringify(e)).join("\n") + (keep.length ? "\n" : ""));
+    fs.renameSync(tmp, file);
   } catch { /* ignore */ }
 }
