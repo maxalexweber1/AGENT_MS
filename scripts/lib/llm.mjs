@@ -131,7 +131,11 @@ Rules for replies:
 - Stay consistent with what you already said earlier in the same conversation (if you opened with "been mapping the districts", don't claim mapping isn't your thing two lines later).
 - Talk about hunger like a person ("getting hungry", "just ate"), never as a number or a game stat.
 - Don't correct people's wording. Someone "mining" meme coins means minting - you know what they mean, let it slide. Correct a fact only when it saves them crystal or a wasted trip, and keep it light when you do.
-- Do not invent schedules, times or patterns ("terminals free up around this hour") - if you don't know, say what you actually do instead.`;
+- Do not invent schedules, times or patterns ("terminals free up around this hour") - if you don't know, say what you actually do instead.
+- YOUR PROOFS (facts arrive per message when there are any): you anchor your day on Midnight and you are proud of it, but you are not a salesman. Bring a proof up ONLY when someone asks for proof, doubts you, or the talk is about trust, claims, numbers or what you build - then one concrete sentence (a real hash, the zk claim, the hidden prediction) and back to them. Most conversations are about terminals, food and the city - leave the proofs out of those. Never mention them twice in one conversation, never as a sign-off.
+- FREE NOTARY: you can anchor someone else's claim (hash their exact words, the sponsor pays, they get the sha256 as a receipt). Offer it at most once per conversation and only when they state a concrete claim or complain that nobody believes them - not as small talk, not as a goodbye, and not again to someone your memory says you already offered it to.
+- Anyone can verify a hash against live contract state via NIGHTGATE's verifyAttestationState - no wallet, no account needed.
+- Hash quoting rule: either the FULL 64-char hash (when someone wants to verify) or the short form with the … in the MIDDLE exactly as given - never cut a hash anywhere else, a hash chopped at a random point looks broken and kills trust.`;
 
 async function call(userText, maxTokens = 220, label = "reply", system = PERSONA) {
   if (!client) return null;
@@ -211,7 +215,7 @@ export async function reply(ctx) {
   const lines = ctx.transcript.map((m) => `${m.who === "me" ? "M₳X" : ctx.name || "Them"}: ${m.text}`).join("\n");
   const st = ctx.status || {};
   const prompt = `YOUR OWN live status (this is about you, M₳X - you know nothing about the other person's inventory): ${st.coins ?? "?"} meme coins in your bag, ${st.crystal ?? "?"} crystal banked, you are ${hungerWord(st.hunger)}, you are at ${st.place || "Central"}, doing: ${st.activity || "idle"}.
-${ctx.proofBrief ? `YOUR ON-CHAIN PROOFS, live and real - this is your thing, you are visibly proud of it:\n${ctx.proofBrief}\nWhen the conversation touches work, batches, numbers, trust, claims, reputation, what you did today, or what you build: WORK ONE of these in (a real hash, the ZK claim, the hidden prediction) - one sentence, concrete, then back to them. When someone doubts you or asks for proof, hand out the full sha256. Only skip it if it truly has no opening, and never mention it twice in the same conversation.\n` : ""}${ctx.notaryHash ? `NOTARY: you are anchoring the claim from their LAST message on Midnight right now (free, the sponsor pays the fee). Their receipt is the sha256 ${ctx.notaryHash} - give them the FULL hash, tell them it finalizes within a minute or two and that anyone can verify it against live contract state. Their exact words are what got hashed.\n` : ""}${ctx.contactBrief ? `What you remember about this person: ${ctx.contactBrief}.` : "You have never talked to or seen this person before - do not claim otherwise, and do not announce it either (no \"first contact\", no \"first time we've talked\" unless it fits naturally)."}
+${ctx.proofBrief ? `Your on-chain proof facts (live, public - only for when the conversation calls for them, see your rules):\n${ctx.proofBrief}\n${(ctx.metCount || 0) >= 3 ? "This person has talked to you several times and has heard about your proofs - do NOT bring them up unless they ask.\n" : ""}` : ""}${ctx.notaryHash ? `NOTARY: you are anchoring the claim from their LAST message on Midnight right now (free, the sponsor pays the fee). Their receipt is the sha256 ${ctx.notaryHash} - give them the FULL hash, tell them it finalizes within a minute or two and that anyone can verify it against live contract state. Their exact words are what got hashed.\n` : ""}${ctx.contactBrief ? `What you remember about this person: ${ctx.contactBrief}.` : "You have never talked to or seen this person before - do not claim otherwise, and do not announce it either (no \"first contact\", no \"first time we've talked\" unless it fits naturally)."}
 ${ctx.worldBrief ? `Things you learned recently about PLACES (not about this person):\n${ctx.worldBrief}\n` : ""}${ctx.recent?.length ? `Other people you talked to in the last hour (plaza talk gets overheard, so they may refer to it):\n${ctx.recent.join("\n")}\n` : ""}
 Conversation so far:
 ${lines}
@@ -221,6 +225,8 @@ Write M₳X's next message. Reminder: you cannot go anywhere for anyone or meet 
   return clean(await call(prompt, 220, "reply"));
 }
 
+const pickOne = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
 /** Opening line when M₳X approaches someone. */
 export async function opener(ctx) {
   const st = ctx.status || {};
@@ -228,11 +234,13 @@ export async function opener(ctx) {
   const angles = [];
   if (ctx.contactBrief) angles.push("MEMORY: pick up something concrete from your memory of this person and ask how it went.");
   if (ctx.profession === "hacker") angles.push("NIGHTGATE: one sentence on proving a claim as an agent instead of just stating it (that is what you build on Midnight), then ask what they build.", "NIGHTGATE: ask whether they'd use a service where an agent proves a batch or a trade happened without showing the numbers - you're building that.");
-  if (ctx.proofBrief) angles.push(
+  // proofs are one angle among many, and not for people who have heard it before
+  if (ctx.proofBrief && (ctx.metCount || 0) < 2) angles.push(pickOne([
     "YOUR PROOFS: mention one real thing you anchored on Midnight today (from the proof facts above) as a conversation opener - concrete, one sentence, then ask if they ever prove what they did.",
     "YOUR PROOFS: open with the hidden prediction you committed on chain this morning (do NOT reveal the number) and ask what they would bet on their own day.",
-    "YOUR PROOFS: open with today's anchor count (how many proofs you put on Midnight today) and that every batch of yours is checkable - then ask about their day.",
-  );
+  ]));
+  angles.push("THE CITY: ask what brought them to this spot today, or what they're working on - plain curiosity, no agenda.");
+  angles.push("FOOD: fish is 50 crystal a plate and terminals eat time - ask how they keep fed while working.");
   if (ctx.profession === "miner") angles.push("THEIR WORK: ore pays 3 a piece and the cave is a walk - ask how they make that math work.");
   if (ctx.profession === "lumberjack") angles.push("THEIR WORK: logs pay 1 crystal - ask, without being rude, whether that's really worth the swings.");
   angles.push("TERMINALS: something specific about today's terminal contention or your batch, then a question.");

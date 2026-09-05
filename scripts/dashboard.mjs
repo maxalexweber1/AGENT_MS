@@ -26,6 +26,7 @@ const KIND_LABEL = {
   report: "daily report", "report-root": "content root", batch: "batch", meeting: "conversation",
   explore: "exploration", notary: "notary", "prediction-commit": "prediction commit",
   "prediction-reveal": "prediction reveal", "grant-test": "system check",
+  pulse: "hourly pulse", meal: "meal", sleep: "sleep", "report-diff": "zk claim: reports differ",
 };
 const kindLabel = (k) => KIND_LABEL[k] || (k?.startsWith("predicate:") ? `zk claim: ${k.slice(10)}` : k || "attest");
 

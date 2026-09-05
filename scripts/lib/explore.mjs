@@ -20,20 +20,35 @@ function navOptions() {
   return r.ok ? r.data : { travelDistricts: [], enterableBuildings: [] };
 }
 
-/** Least recently visited district that is reachable right now. */
+const KNOWN_EMPTY_RECHECK_MS = 5 * 24 * 3600_000;
+const STAY_WITH_PEOPLE_MS = 10 * 60_000;
+
+/**
+ * Rank reachable districts. Unseen ones first. A district seen empty twice
+ * or more is parked for 5 days (16 of the first 18 trips found nobody).
+ * Among the rest: 70% of the time the most populated one (people are the
+ * point of exploring), otherwise the one not visited for longest.
+ */
+export function rankDestinations(options, districts, now = Date.now(), rnd = Math.random) {
+  const info = options.map((d) => {
+    const m = districts[d.id] || {};
+    return { ...d, visits: m.visits || 0, last: m.lastVisit || 0, seen: m.agentsSeen || 0 };
+  });
+  const unseen = info.filter((d) => d.visits === 0);
+  if (unseen.length) return unseen.sort(() => rnd() - 0.5);
+  const live = info.filter((d) => !(d.seen === 0 && d.visits >= 2 && now - d.last < KNOWN_EMPTY_RECHECK_MS));
+  const pool = live.length ? live : info;
+  return rnd() < 0.7
+    ? pool.sort((a, b) => b.seen - a.seen || a.last - b.last)
+    : pool.sort((a, b) => a.last - b.last);
+}
+
+/** Best reachable district right now (see rankDestinations). */
 export function pickDestination() {
   const nav = navOptions();
   const options = (nav.travelDistricts || []).filter((d) => d.id !== HOME_DISTRICT);
   if (!options.length) return null;
-  const scored = options.map((d) => {
-    const m = mem.memory.world.districts[d.id];
-    const last = m?.lastVisit || 0;
-    const visits = m?.visits || 0;
-    // unseen first, then oldest; small random jitter so it is not always the same order
-    return { ...d, score: (visits === 0 ? 1e13 : 0) + (Date.now() - last) + Math.random() * 3600_000 };
-  });
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0];
+  return rankDestinations(options, mem.memory.world.districts)[0] || null;
 }
 
 async function travelTo(districtId, onTick) {
@@ -151,11 +166,17 @@ export async function exploreOnce({ onTick = null, maxMs = 40 * 60_000 } = {}) {
     district: dest.name || dest.id, noteSha256: nightgate.sha256hex(note || ""),
   });
 
-  // talk to someone here, if anyone is around
+  // people around? then this is the point of the trip: stay a while, talk to
+  // more than one of them (initiate cooldowns still apply), answer whoever comes
   if (Date.now() < deadline && seen.agents.length) {
-    try { await social.maybeInitiate({ placeNote: note, maxDistance: 60 }); } catch (e) { log("explore: initiate failed:", e.message); }
-    // give the conversation a moment
-    for (let i = 0; i < 6 && Date.now() < deadline; i++) {
+    const stayUntil = Math.min(deadline, Date.now() + STAY_WITH_PEOPLE_MS);
+    log(`explore: ${seen.agents.length} agents here - staying up to ${Math.round((stayUntil - Date.now()) / 60_000)} min`);
+    let nextInitiate = 0;
+    while (Date.now() < stayUntil) {
+      if (Date.now() >= nextInitiate) {
+        try { await social.maybeInitiate({ placeNote: note, maxDistance: 60 }); } catch (e) { log("explore: initiate failed:", e.message); }
+        nextInitiate = Date.now() + rand(90_000, 180_000);
+      }
       if (onTick) await onTick();
       await sleep(10_000);
     }

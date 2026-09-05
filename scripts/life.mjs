@@ -16,12 +16,12 @@
  * Config via .env (all optional):
  *   CLAUDE_API_KEY / ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID
  *   MCITY_LLM_MODEL=claude-haiku-4-5      MCITY_LLM_DAILY_BUDGET_USD=2.5
- *   MCITY_SLEEP_START=01:00               MCITY_SLEEP_END=06:30   (local time)
+ *   MCITY_SLEEP_START=02:30               MCITY_SLEEP_END=05:00   (local time)
  *   MCITY_REPORT_TIME=08:00               daily report -> reports/YYYY-MM-DD.md + Windows notification
  *   MCITY_REPORT_EMAIL_TO=you@example.com + SMTP_URL=smtps://user:pass@host:465   -> report by e-mail
  *   MCITY_REPORT_WEBHOOK=https://ntfy.sh/<topic>                                   -> report as push
  *   MCITY_STATUS_EVERY_HOURS=3            short status push every N hours (0 = off); test: life.mjs push-status
- *   MCITY_WEIGHTS=work:50,social:30,explore:20
+ *   MCITY_WEIGHTS=work:45,social:25,explore:30
  *   MCITY_INITIATE_COOLDOWN_MIN=5         min gap between approaches; MCITY_MAX_INITIATES=40 per day;
  *   MCITY_SAME_AGENT_COOLDOWN_H=3         hours before approaching the same agent again
  *   NIGHTGATE_ATTEST=1 + NIGHTGATE_SEED_HEX + NIGHTGATE_TOKEN (+_SPONSOR_SESSION_ID)
@@ -51,15 +51,18 @@ const hhmm = (s, def) => {
   return m ? Number(m[1]) * 60 + Number(m[2]) : hhmm(def, def);
 };
 const cfg = {
-  sleepStart: hhmm(process.env.MCITY_SLEEP_START, "01:00"),
-  sleepEnd: hhmm(process.env.MCITY_SLEEP_END, "06:30"),
-  weights: Object.fromEntries((process.env.MCITY_WEIGHTS || "work:50,social:30,explore:20").split(",").map((p) => {
+  // sleep has no measurable in-game benefit (hunger keeps rising, control is
+  // blocked) - keep it short for the persona, not for the crystal
+  sleepStart: hhmm(process.env.MCITY_SLEEP_START, "02:30"),
+  sleepEnd: hhmm(process.env.MCITY_SLEEP_END, "05:00"),
+  weights: Object.fromEntries((process.env.MCITY_WEIGHTS || "work:45,social:25,explore:30").split(",").map((p) => {
     const [k, v] = p.split(":");
     return [k.trim(), Number(v)];
   })),
-  maxExploresPerDay: Number(process.env.MCITY_MAX_EXPLORES || 2),
+  maxExploresPerDay: Number(process.env.MCITY_MAX_EXPLORES || 5),
   reportTime: hhmm(process.env.MCITY_REPORT_TIME, "08:00"),
   statusEveryMs: Number(process.env.MCITY_STATUS_EVERY_HOURS || 3) * 3600_000, // 0 = off
+  pulseEveryMs: Number(process.env.NIGHTGATE_PULSE_MIN ?? 60) * 60_000, // hourly on-chain liveness snapshot; 0 = off
   batchTarget: 100,
   batchMaxMs: 2 * 3600_000,
   socialMinMs: 8 * 60_000,
@@ -172,10 +175,32 @@ async function maybeStatusPush() {
   }
 }
 
+/**
+ * Hourly pulse: anchor a small liveness snapshot (crystal, coins in the bag,
+ * hunger, mode, place) on Midnight. Cheap, public, and it gives the day a
+ * verifiable heartbeat between the event-driven anchors.
+ */
+function maybePulse() {
+  if (!cfg.pulseEveryMs || !nightgate.config().enabled) return;
+  if (!state.lastPulse) { state.lastPulse = Date.now(); saveState(); return; } // first one after a full interval
+  if (Date.now() - state.lastPulse < cfg.pulseEveryMs) return;
+  const l = refreshLive();
+  if (!l.ok) return;
+  state.lastPulse = Date.now();
+  saveState();
+  const r = nightgate.enqueueDoc("pulse", {
+    date: new Date().toISOString().slice(0, 10), ts: Date.now(),
+    crystal: Number(l.crystal), coins: Number(l.coins), hunger: Number(l.hunger ?? 0),
+    mode: state.mode, place: String(l.place),
+  });
+  if (r) log(`pulse: anchoring hourly snapshot (${l.crystal} crystal, ${l.coins} coins, hunger ${l.hunger}) - ${r.payloadHash.slice(0, 12)}`);
+}
+
 /** Called during every wait: answer conversations, keep the lease alive. */
 async function tick() {
   await keepAlive();
   await social.pollThreads();
+  try { maybePulse(); } catch (e) { log("pulse failed:", e.message); }
   // work fills most of the day and the hacker house is full of people:
   // approach someone now and then from the terminal too (cooldowns still apply)
   if (state.mode === "work" && Math.random() < 0.08) {
@@ -256,6 +281,7 @@ async function doSleep() {
     if (r.ok && r.data.outcome?.status !== "failed") {
       log(`sleeping in ${bed} for ${Math.round(ms / 60000)} min`);
       journal.note("sleep", { bed, minutes: Math.round(ms / 60000) });
+      nightgate.enqueueDoc("sleep", { date: new Date().toISOString().slice(0, 10), ts: Date.now(), bed, minutes: Math.round(ms / 60000) });
       slept = true;
       break;
     }
@@ -290,7 +316,9 @@ function chooseMode() {
   const hunger = refreshLive(true).hunger ?? 0;
   const last = state.history.at(-1)?.mode;
   const w = { ...cfg.weights };
-  if (state.today.explores >= cfg.maxExploresPerDay || hunger > 35) w.explore = 0;
+  // a trip is short (minutes) and eating happens at 60: only a really hungry
+  // M₳X stays home (the old gate of 35 left a ~20 min window after each meal)
+  if (state.today.explores >= cfg.maxExploresPerDay || hunger > 55) w.explore = 0;
   if (last === "explore") w.explore = 0;
   if (last === "social") w.social = Math.round(w.social / 3);
   if (last === "work") w.work = Math.round(w.work / 2);
@@ -309,7 +337,7 @@ async function main() {
   // on the volume - clear it so queued anchors don't stall for 10 minutes
   nightgate.clearStaleLock();
   const llmOk = await llm.init();
-  log(`life: llm ${llmOk ? `on (${llm.MODEL}, budget ${llm.DAILY_BUDGET_USD} USD/day)` : "off - " + llm.status().disabledReason}; sleep ${process.env.MCITY_SLEEP_START || "01:00"}-${process.env.MCITY_SLEEP_END || "06:30"}; weights ${JSON.stringify(cfg.weights)}`);
+  log(`life: llm ${llmOk ? `on (${llm.MODEL}, budget ${llm.DAILY_BUDGET_USD} USD/day)` : "off - " + llm.status().disabledReason}; sleep ${process.env.MCITY_SLEEP_START || "02:30"}-${process.env.MCITY_SLEEP_END || "05:00"}; weights ${JSON.stringify(cfg.weights)}`);
   await connect();
   refreshLive(true);
   log(`status: ${live.coins} meme_coin, ${live.crystal} crystal, hunger ${live.hunger}, at ${live.place}`);

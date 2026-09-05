@@ -435,9 +435,7 @@ export function proofBrief() {
   if (p.commitPending) lines.push(`This morning's prediction of today's coin count is COMMITTED on chain but still hidden - it gets revealed tomorrow morning. Do not state the number, it is secret until the reveal.`);
   if (p.reveal) lines.push(`Yesterday's revealed prediction (${p.reveal.date}): ${p.reveal.predictedCoins} coins, committed before the day started.`);
   if (p.score) lines.push(`Prediction track record: ${p.score.evaluated} evaluated, ${p.score.within10} within 10%, ${p.score.within25} within 25%, avg error ${p.score.avgErrorPct}%${p.score.last ? ` (last: predicted ${p.score.last.predicted}, actual ${p.score.last.actual})` : ""} - every one committed on chain BEFORE the day.`);
-  lines.push(`You also run a FREE NOTARY service: anyone can ask you to anchor a claim of theirs - you hash their exact words, anchor the hash on Midnight (the sponsor pays) and hand them the sha256 as their receipt. You notarized ${p.notarizedToday} claim${p.notarizedToday === 1 ? "" : "s"} today. Offer it when someone claims something big or bemoans that nobody believes them.`);
-  lines.push(`Anyone can verify a hash against live contract state via NIGHTGATE's verifyAttestationState - no wallet, no account needed.`);
-  lines.push(`Hash quoting rule: either the FULL 64-char hash (when someone wants to verify) or the short form with the … in the MIDDLE exactly as given above - never cut a hash anywhere else, a hash chopped at a random point looks broken and kills trust.`);
+  lines.push(`Notary claims you anchored for other agents today: ${p.notarizedToday}.`);
   return lines.join("\n");
 }
 
@@ -556,9 +554,16 @@ export function releaseLock() {
 export function clearStaleLock(maxAgeMs = 3 * 60_000) {
   try {
     const st = fs.statSync(lockFile);
-    if (Date.now() - st.mtimeMs > maxAgeMs) {
+    // the lock names the worker's pid: a pid that no longer exists (container
+    // restart, crash) means the lock is orphaned however fresh its mtime is
+    let alive = true;
+    try {
+      const pid = Number(fs.readFileSync(lockFile, "utf8").trim());
+      if (pid > 0 && pid !== process.pid) process.kill(pid, 0);
+    } catch (e) { alive = e?.code === "EPERM"; }
+    if (!alive || Date.now() - st.mtimeMs > maxAgeMs) {
       fs.unlinkSync(lockFile);
-      log("nightgate: cleared stale anchor-worker lock");
+      log(`nightgate: cleared ${alive ? "stale" : "orphaned"} anchor-worker lock`);
       if (readQueue().length) kickWorker();
     }
   } catch { /* no lock */ }

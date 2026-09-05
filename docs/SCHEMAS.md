@@ -42,6 +42,9 @@ stay in sync with it.
 | `notary` | `claimant`, `claimantId`, `claim`, `claimSha256` | the free notary service: `claim` is the claimant's **exact message text**, `claimSha256 = sha256(claim)` |
 | `prediction` | `predictedCoins` | the daily hidden prediction (commit/reveal, see below) |
 | `grant-test` | `note` | plumbing self-tests |
+| `pulse` | `crystal`, `coins`, `hunger`, `mode`, `place` | hourly liveness snapshot: crystal balance, meme coins in the bag, hunger (0-100), current mode (`work`/`social`/`explore`/`sleep`) and space id |
+| `meal` | `food`, `cost`, `hungerBefore`, `hungerAfter` | one meal bought and eaten |
+| `sleep` | `bed`, `minutes` | one night in a Charging House bed (planned duration) |
 
 ### Worked example (`batch`)
 

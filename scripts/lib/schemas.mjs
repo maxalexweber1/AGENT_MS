@@ -33,6 +33,9 @@ export const SCHEMAS = {
   notary: ["claimant", "claimantId", "claim", "claimSha256"],
   prediction: ["predictedCoins"],
   "grant-test": ["note"],
+  pulse: ["crystal", "coins", "hunger", "mode", "place"],
+  meal: ["food", "cost", "hungerBefore", "hungerAfter"],
+  sleep: ["bed", "minutes"],
 };
 
 /** Metadata envelope (hashed into metadataHash), same for every kind. */

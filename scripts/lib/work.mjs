@@ -9,7 +9,10 @@ import * as nightgate from "./nightgate.mjs";
 
 export const HACKER_SPACE = "hacker-house-interior";
 const COIN = "meme_coin";
-const BUSY_RETRY_MS = 30_000;
+// terminals free up whenever another agent's cycle ends: a short retry grabs
+// them sooner. ~40% of attempts bounce, so this interval is most of the idle time.
+const BUSY_RETRY_MS = Number(process.env.MCITY_BUSY_RETRY_S || 15) * 1000;
+const BUSY_GIVE_UP_MS = 20 * 60_000;
 const ERROR_RETRY_MS = 20_000;
 export const EAT_AT_HUNGER = 60;
 const FOOD_PRIORITY = ["fish", "meat", "to_go_food", "matcha_smoothie"];
@@ -128,6 +131,7 @@ export async function maybeEat({ threshold = EAT_AT_HUNGER, onTick = null } = {}
   if (o.status === "confirmed") {
     log(`ate ${o.itemId || have}: hunger ${o.hungerBefore} -> ${o.hungerAfter}`);
     journal.note("meal", { food: o.itemId || have, cost: 50, hungerBefore: o.hungerBefore, hungerAfter: o.hungerAfter });
+    nightgate.enqueueDoc("meal", { date: new Date().toISOString().slice(0, 10), ts: Date.now(), food: String(o.itemId || have), cost: 50, hungerBefore: Number(o.hungerBefore ?? 0), hungerAfter: Number(o.hungerAfter ?? 0) });
     return true;
   }
   log(`eat outcome ${o.status}${o.reason ? ": " + o.reason : ""}`);
@@ -174,7 +178,7 @@ export async function farmBatch({ target = 100, untilMs = Infinity, onTick = nul
   let { coins } = getInventory();
   log(`work: batch to ${target} ${COIN} (have ${coins})`);
   let failStreak = 0;
-  let busyStreak = 0;
+  let busySince = 0;
   let lastHunger = Date.now();
   while (coins < target) {
     if (Date.now() > untilMs || shouldStop()) { log("work: stopping batch early (plan)"); break; }
@@ -182,10 +186,11 @@ export async function farmBatch({ target = 100, untilMs = Infinity, onTick = nul
     await ensureInHackerHouse(onTick);
     const result = await harvestOnce(coins, onTick);
     if (result === true) {
-      failStreak = 0; busyStreak = 0;
+      failStreak = 0; busySince = 0;
       coins = getInventory().coins;
     } else if (result === "busy") {
-      if (++busyStreak >= 40) { log("work: terminals busy for 20 minutes - giving the batch up for now"); break; }
+      busySince ||= Date.now();
+      if (Date.now() - busySince >= BUSY_GIVE_UP_MS) { log("work: terminals busy for 20 minutes - giving the batch up for now"); break; }
     } else if (++failStreak >= 8) {
       log("work: 8 cycles without coins - giving up this batch");
       break;

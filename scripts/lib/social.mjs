@@ -184,6 +184,7 @@ async function answerThread(t, otherId) {
   if (!reply && llm.enabled()) {
     reply = await llm.reply({
       transcript, name: c.name, contactBrief: briefBefore, status,
+      metCount: mem.memory.contacts[otherId]?.met || 0,
       proofBrief: nightgate.proofBrief(), notaryHash,
       replyIndex: mine, maxReplies: limit, isLast, worldBrief: mem.worldBrief(6),
       recent: recentConversations(otherId),
@@ -326,6 +327,7 @@ export async function maybeInitiate({ placeNote = "", maxDistance = 40 } = {}) {
     text = await llm.opener({
       name: c.name, profession: target.profession, theirStatus: target.status, distance: target.distance,
       contactBrief: mem.contactBrief(target.id), status, proofBrief: nightgate.proofBrief(),
+      metCount: mem.memory.contacts[target.id]?.met || 0,
       worldBrief: placeNote || mem.worldBrief(4), recentOpeners,
     });
   }

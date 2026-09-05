@@ -21,6 +21,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadDotEnv, dataDir, scriptsDir, log } from "./lib/mc.mjs";
 import * as journal from "./lib/journal.mjs";
 import * as report from "./lib/report.mjs";
@@ -37,6 +38,23 @@ const REPORT_FIELDS = ["crystal", "coinsSold", "crystalFromCoins", "batches", "m
 // predictions committed before the vault migration live on the public vault
 const LEGACY_VAULT = "9b97a6764805789852351a401b7cfc137097d591cabe33926dfbc42792c00137";
 const MILESTONES = [1_000_000, 500_000, 250_000, 100_000, 50_000, 25_000, 10_000, 5_000, 1_000];
+// further daily ZK claims over the same report: field >= floor(value / step) * step
+// (the real value stays hidden; a claim is skipped when the rounded threshold is 0)
+const EXTRA_PREDICATES = [
+  { field: "coinsSold", step: 100 },
+  { field: "replies", step: 50 },
+  { field: "conversations", step: 50 },
+  { field: "batches", step: 5 },
+];
+// daily cross-report diff: at least this many of the 9 fields differ from yesterday (0 = off)
+const DIFF_MIN_FIELDS = Number(process.env.NIGHTGATE_DIFF_MIN_FIELDS ?? 3);
+
+/** Rounded-down thresholds for the extra claims: [{ field, threshold }], zeros dropped. */
+export function planPredicates(document, plan = EXTRA_PREDICATES) {
+  return plan
+    .map(({ field, step }) => ({ field, threshold: Math.floor((Number(document[field]) || 0) / step) * step }))
+    .filter((p) => p.threshold > 0);
+}
 
 function readDocProof(date) {
   try { return JSON.parse(fs.readFileSync(path.join(ng.docProofsDir, `${date}.json`), "utf8")); } catch { return null; }
@@ -120,6 +138,24 @@ async function daily() {
     enqueuePredicate(dp, "crystal", 1, milestone, { kick: false });
     log(`queued ZK claim: crystal >= ${milestone} (real value stays hidden)`);
   }
+  // 3b. more claims over the same anchored document (one tx each)
+  for (const { field, threshold } of planPredicates(document)) {
+    if (ng.history().some((a) => a.ok && a.kind === `predicate:${field}` && a.date === date)) continue;
+    enqueuePredicate(dp, field, 1, threshold, { kick: false });
+    log(`queued ZK claim: ${field} >= ${threshold} (real value stays hidden)`);
+  }
+  // 3c. yesterday vs today: at least DIFF_MIN_FIELDS fields changed (which ones stays hidden)
+  const prevDate = listDocProofs().filter((d) => d < date).at(-1);
+  const prev = prevDate ? readDocProof(prevDate) : null;
+  if (prev && DIFF_MIN_FIELDS > 0 && !ng.history().some((a) => a.ok && a.kind === "report-diff" && a.date === date)) {
+    ng.enqueue({
+      kind: "report-diff", call: "proveFieldsDiffer",
+      params: { payloadHashA: prev.payloadHash, payloadHashB: dp.payloadHash, k: DIFF_MIN_FIELDS },
+      docPair: { schema: prev.schema, openingA: prev.opening, openingB: dp.opening },
+      meta: { dateA: prevDate, dateB: date },
+    }, { kick: false });
+    log(`queued ZK claim: >= ${DIFF_MIN_FIELDS} report fields differ between ${prevDate} and ${date}`);
+  }
 
   // 4. predictions: reveal yesterday's commit, then commit today's
   const preds = readPredictions();
@@ -200,9 +236,15 @@ async function diff([k, dateA, dateB]) {
   await drain();
 }
 
-const [sub, ...rest] = process.argv.slice(2);
-(sub === "prove" ? prove(rest) : sub === "diff" ? diff(rest) : daily()).catch((e) => {
-  log("attest failed:", e.message);
-  try { journal.note("attest", { ok: false, error: e.message.slice(0, 200) }); } catch { /* ignore */ }
-  process.exit(1);
-});
+// Only run when executed directly (life.mjs spawns this file as a child).
+// Importing the module - e.g. for planPredicates() in a test - must never
+// kick off a real on-chain daily run.
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (isMain) {
+  const [sub, ...rest] = process.argv.slice(2);
+  (sub === "prove" ? prove(rest) : sub === "diff" ? diff(rest) : daily()).catch((e) => {
+    log("attest failed:", e.message);
+    try { journal.note("attest", { ok: false, error: e.message.slice(0, 200) }); } catch { /* ignore */ }
+    process.exit(1);
+  });
+}
