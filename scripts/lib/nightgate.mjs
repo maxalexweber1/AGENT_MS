@@ -39,6 +39,8 @@ import { canonical } from "./schemas.mjs";
 
 export const AGENT_ID = process.env.MCITY_AGENT_ID || "user-agent-d23b30d5-520e-4b3f-aae4-307ed85a7b34";
 const attestFile = path.join(dataDir, "attestations.json");
+const statsFile = path.join(dataDir, "anchor-stats.json");
+const journalFile = path.join(dataDir, "journal.jsonl");
 const queueFile = path.join(dataDir, "anchor-queue.jsonl");
 const lockFile = path.join(dataDir, "anchor-worker.lock");
 export const docProofsDir = path.join(dataDir, "doc-proofs");
@@ -290,11 +292,74 @@ export function history() {
 
 export function record(entry) {
   const all = history();
-  all.push({ at: Date.now(), ...entry });
+  const full = { at: Date.now(), ...entry };
+  all.push(full);
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(attestFile, JSON.stringify(all.slice(-500), null, 2));
   } catch (e) { log("attestation log write failed:", e.message); }
+  bumpStats(full);
+}
+
+// ---------- lifetime counters (data/anchor-stats.json) ----------
+// attestations.json keeps only the last 500 entries (the timeline), so totals
+// live here and are incremented on every record(). Missing file -> rebuilt
+// once from the journal's `attest` events plus whatever attestations.json
+// still holds (deduplicated by payloadHash / timestamp).
+
+const emptyStats = () => ({ ok: 0, failed: 0, byKind: {}, firstAt: null, lastAt: null });
+
+function applyStat(st, a) {
+  if (a.ok) {
+    st.ok += 1;
+    const k = a.kind || "attest";
+    st.byKind[k] = (st.byKind[k] || 0) + 1;
+  } else {
+    st.failed += 1;
+  }
+  if (a.at) {
+    st.firstAt = st.firstAt == null ? a.at : Math.min(st.firstAt, a.at);
+    st.lastAt = st.lastAt == null ? a.at : Math.max(st.lastAt, a.at);
+  }
+}
+
+function writeStats(st) {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const tmp = `${statsFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(st, null, 2));
+    fs.renameSync(tmp, statsFile);
+  } catch (e) { log("anchor stats write failed:", e.message); }
+}
+
+function rebuildStats() {
+  const st = emptyStats();
+  const seen = new Set();
+  // report, report-root and the zk claim share one payloadHash but are distinct on-chain calls -> kind is part of the key
+  const key = (a) => `${a.payloadHash ? `h:${a.payloadHash}` : `t:${a.at}`}:${a.kind}:${a.ok ? 1 : 0}`;
+  const add = (a) => { const k = key(a); if (seen.has(k)) return; seen.add(k); applyStat(st, a); };
+  try {
+    for (const line of fs.readFileSync(journalFile, "utf8").split("\n")) {
+      if (!line) continue;
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      if (e?.type === "attest") add(e);
+    }
+  } catch { /* no journal */ }
+  for (const a of history()) add(a);
+  log(`anchor stats rebuilt: ${st.ok} ok, ${st.failed} failed`);
+  writeStats(st);
+  return st;
+}
+
+/** Lifetime anchor counters: { ok, failed, byKind, firstAt, lastAt }. */
+export function stats() {
+  try { return { ...emptyStats(), ...JSON.parse(fs.readFileSync(statsFile, "utf8")) }; } catch { return rebuildStats(); }
+}
+
+function bumpStats(a) {
+  const st = stats();
+  applyStat(st, a);
+  writeStats(st);
 }
 
 /** The most recent successful attestation, or null. `kind` filters. */
@@ -343,7 +408,7 @@ export function proofFacts() {
   const reveal = last((a) => a.kind === "prediction-reveal");
   const batch = last((a) => a.kind === "batch");
   return {
-    total: h.length,
+    total: stats().ok,
     todays: h.filter((a) => a.date === day).length,
     vault: config().vault,
     network: config().network,

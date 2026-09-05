@@ -31,11 +31,12 @@ const kindLabel = (k) => KIND_LABEL[k] || (k?.startsWith("predicate:") ? `zk cla
 
 function collect() {
   const cfg = ng.config();
-  const all = ng.history();
+  const all = ng.history();          // last 500 entries: the timeline
+  const st = ng.stats();             // lifetime counters (attestations.json is capped)
   const ok = all.filter((a) => a.ok);
   const today = new Date().toISOString().slice(0, 10);
   const byKind = {};
-  for (const a of ok) byKind[kindLabel(a.kind)] = (byKind[kindLabel(a.kind)] || 0) + 1;
+  for (const [k, n] of Object.entries(st.byKind)) byKind[kindLabel(k)] = (byKind[kindLabel(k)] || 0) + n;
   let preds = [];
   try { preds = JSON.parse(fs.readFileSync(ng.predictionsFile, "utf8")); } catch { /* none yet */ }
   const predicate = [...ok].reverse().find((a) => a.call === "proveFieldPredicate" && a.kind === "predicate:crystal");
@@ -43,9 +44,9 @@ function collect() {
     generatedAt: new Date().toISOString(),
     network: cfg.network, vault: cfg.vault, artifact: cfg.artifact,
     attesterId: ok.at(-1)?.attesterId || "",
-    total: ok.length, todays: ok.filter((a) => a.date === today).length,
-    failed: all.length - ok.length,
-    notarized: ok.filter((a) => a.kind === "notary").length,
+    total: st.ok, todays: ok.filter((a) => a.date === today).length,
+    failed: st.failed,
+    notarized: st.byKind.notary || 0,
     byKind,
     milestone: predicate ? { threshold: predicate.threshold, date: predicate.date } : null,
     score: ng.scoreboard(),

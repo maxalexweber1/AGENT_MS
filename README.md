@@ -77,8 +77,9 @@ sha256 you can check yourself.
                                  │     (CHAIN_EXECUTION_FAILED) rebuild once and re-sponsor
                                  │  4. verifyAttestationState against live contract state
                                  ▼
-                       data/attestations.json + journal ──► daily report, status pushes,
-                                                            and M₳X's conversations
+                       data/attestations.json (last 500) + lifetime counters in
+                       data/anchor-stats.json + journal ──► daily report, dashboard,
+                                                            status pushes, conversations
 ```
 
 ## Running it
