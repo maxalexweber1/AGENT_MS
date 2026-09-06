@@ -33,10 +33,14 @@ transaction to a NIGHTGATE fee sponsor.
 | **A hidden prediction of today's coin count** | `attestGuarded` commit/reveal: committed in the morning, revealed the next day — provably made *before* the outcome (the live scoreboard tracks his hit rate) | daily |
 | **"≥ k fields changed between two days"** — without saying which | `proveDocumentComparison` cross-root ZK proof | on demand |
 
-M₳X runs on his **own AttestationVault**, deployed 2026-09-03 through the same
-sponsored pipeline: built, proven and signed with his key — registrar identity
-and all — while an `allowDeploy` grant paid the fee. Vault:
-`0923eee3c5908ca82d671708dcb85af06080b0920b6bd754e1b138843105240c`.
+M₳X runs on his **own AttestationVault**, deployed through the same sponsored
+pipeline: built, proven and signed with his key — registrar identity and all —
+while an `allowDeploy` grant paid the fee. Current vault (lineage 3, deployed
+2026-09-06 for NIGHTGATE 0.23 / nightgate-tx 0.5):
+`d86c361c37d988966731ee42f85a4a24115559ade606d2d9c109d84ccd8a9c67`.
+Earlier anchors stay verifiable on the previous vaults
+(`0923eee3…5240c`, 2026-09-03 to 2026-09-06, and the shared public vault
+`9b97a676…c00137` before that); nothing new lands there.
 
 Every anchored hash is sha256 over a **published canonical JSON envelope** —
 field lists, ordering and a worked example live in
@@ -73,9 +77,12 @@ sha256 you can check yourself.
                                  │     in-process wasm, seed never leaves the machine)
                                  │  2. sponsorUnboundTransaction  ── sponsor pays the dust,
                                  │     the on-chain effect carries M₳X's OWN attester id
-                                 │  3. poll getJobStatus; on a same-block vault conflict
-                                 │     (CHAIN_EXECUTION_FAILED) rebuild once and re-sponsor
+                                 │  3. poll getJobStatus; if the call was refused on chain
+                                 │     (CHAIN_EXECUTION_FAILED: fee burned) record the burned
+                                 │     attempt, rebuild once against fresh state, re-sponsor
                                  │  4. verifyAttestationState against live contract state
+                                 │  5. before the NEXT build: wait until this tx is visible
+                                 │     in the public indexer the builder reads state from
                                  ▼
                        data/attestations.json (last 500) + lifetime counters in
                        data/anchor-stats.json + journal ──► daily report, dashboard,
@@ -94,6 +101,8 @@ node scripts/life.mjs report                 # last 24h as markdown
 node scripts/life.mjs attest                 # daily proof run by hand
 node scripts/life.mjs prove crystal min 100000   # on-demand ZK claim
 node scripts/life.mjs prove-diff 1              # ">=1 field changed since yesterday"
+node scripts/life.mjs anchors pause 30          # no on-chain transactions for 30 min (queue waits)
+node scripts/life.mjs anchors resume            # drain what queued up meanwhile
 ```
 
 Requirements:

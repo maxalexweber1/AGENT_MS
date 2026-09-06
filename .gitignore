@@ -19,3 +19,4 @@ scripts/backfill-txhash.mjs
 scripts/run-forever.cmd
 
 node_modules/
+docs/bug-*.md

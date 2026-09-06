@@ -15,7 +15,9 @@
  *   3. queue: milestone predicate "crystal >= <largest round milestone>"
  *      (ZK - the actual number stays hidden)
  *   4. reveal yesterday's prediction commit, then commit a fresh prediction
- *      for today (attestGuarded commit/reveal - provably made BEFORE the outcome)
+ *      for today (attestGuarded commit/reveal - provably made BEFORE the outcome;
+ *      lineage 3: a commit is bound to its committer and EXPIRES - the reveal
+ *      must land within COMMIT_WINDOW_H, and only on the vault the commit hit)
  *   5. drain the anchor queue (strictly serial, see anchor-worker.mjs)
  */
 
@@ -35,8 +37,6 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 /** ORDERED and STABLE: the leaf index is part of the tree identity. Never reorder. */
 const REPORT_FIELDS = ["crystal", "coinsSold", "crystalFromCoins", "batches", "meals", "replies", "openers", "conversations", "explores"];
-// predictions committed before the vault migration live on the public vault
-const LEGACY_VAULT = "9b97a6764805789852351a401b7cfc137097d591cabe33926dfbc42792c00137";
 const MILESTONES = [1_000_000, 500_000, 250_000, 100_000, 50_000, 25_000, 10_000, 5_000, 1_000];
 // further daily ZK claims over the same report: field >= floor(value / step) * step
 // (the real value stays hidden; a claim is skipped when the rounded threshold is 0)
@@ -159,23 +159,36 @@ async function daily() {
 
   // 4. predictions: reveal yesterday's commit, then commit today's
   const preds = readPredictions();
+  const nowS = Math.floor(Date.now() / 1000);
   for (const p of preds) {
-    if (!p.revealed && p.date < date && ng.history().some((a) => a.ok && a.commitment === p.commitment)) {
-      ng.enqueue({
-        kind: "prediction-reveal", call: "attestReveal",
-        params: { payloadHash: p.payloadHash, metadataHash: p.metadataHash, nonce: p.nonce },
-        doc: p.prediction, meta: { kind: "prediction", date: p.date },
-        vault: p.vault || LEGACY_VAULT, // reveal must hit the vault the commit landed on
-      }, { kick: false });
-      p.revealed = true;
-      // score it: this morning's document covers the predicted day
-      const predicted = p.prediction?.predictedCoins;
-      if (typeof predicted === "number") {
-        p.actual = document.coinsSold;
-        p.errorPct = predicted ? Math.round(((p.actual - predicted) / predicted) * 100) : null;
-      }
-      log(`queued reveal of the ${p.date} prediction: ${JSON.stringify(p.prediction)} (actual: ${p.actual ?? "?"}, error ${p.errorPct ?? "?"}%)`);
+    if (p.revealed || p.voided || !(p.date < date)) continue;
+    if (!ng.history().some((a) => a.ok && a.commitment === p.commitment)) continue;
+    // a reveal must hit the vault the commit landed on. Commits on a previous
+    // vault (lineage 2, before the 0.5.0 migration) cannot be revealed any more.
+    if (p.vault !== cfg.vault) {
+      p.voided = `commit lives on vault ${ng.shortHash(p.vault || "?")} (previous lineage) - not revealable after the vault migration`;
+      log(`prediction ${p.date} voided: ${p.voided}`);
+      continue;
     }
+    if (p.expiresAt && nowS >= p.expiresAt) {
+      p.voided = `commitment expired ${new Date(p.expiresAt * 1000).toISOString()} before the reveal`;
+      log(`prediction ${p.date} voided: ${p.voided}`);
+      continue;
+    }
+    ng.enqueue({
+      kind: "prediction-reveal", call: "attestReveal",
+      params: { payloadHash: p.payloadHash, metadataHash: p.metadataHash, nonce: p.nonce },
+      doc: p.prediction, meta: { kind: "prediction", date: p.date },
+      vault: p.vault,
+    }, { kick: false });
+    p.revealed = true;
+    // score it: this morning's document covers the predicted day
+    const predicted = p.prediction?.predictedCoins;
+    if (typeof predicted === "number") {
+      p.actual = document.coinsSold;
+      p.errorPct = predicted ? Math.round(((p.actual - predicted) / predicted) * 100) : null;
+    }
+    log(`queued reveal of the ${p.date} prediction: ${JSON.stringify(p.prediction)} (actual: ${p.actual ?? "?"}, error ${p.errorPct ?? "?"}%)`);
   }
   if (!preds.some((p) => p.date === date)) {
     // predicted coins = rounded average of the last 3 days of batches, clamped
@@ -188,9 +201,12 @@ async function daily() {
     const prediction = can.envelope;
     const payloadHash = can.payloadHash;
     const c = await ng.prepareAnchorCommitment(payloadHash, can.metaJson, cfg);
-    preds.push({ date, prediction, payloadHash, metadataHash: c.metadataHash, nonce: c.nonce, commitment: c.commitment, vault: cfg.vault, revealed: false });
-    ng.enqueue({ kind: "prediction-commit", call: "attestCommit", params: { commitment: c.commitment }, meta: { date } }, { kick: false });
-    log(`committing today's prediction (hidden until tomorrow): ${predictedCoins} coins`);
+    // the commit expires (lineage 3): tomorrow morning's reveal has 36 h, the
+    // server's own suggestion (c.expiresAt, now + 24 h) is too tight for a late run
+    const expiresAt = ng.commitExpiresAt();
+    preds.push({ date, prediction, payloadHash, metadataHash: c.metadataHash, nonce: c.nonce, commitment: c.commitment, expiresAt, vault: cfg.vault, revealed: false });
+    ng.enqueue({ kind: "prediction-commit", call: "attestCommit", params: { commitment: c.commitment, expiresAt }, meta: { date } }, { kick: false });
+    log(`committing today's prediction (hidden until tomorrow, expires ${new Date(expiresAt * 1000).toISOString()}): ${predictedCoins} coins`);
   }
   writePredictions(preds);
 

@@ -12,6 +12,9 @@
  *   node scripts/life.mjs attest [file]   # daily proof run: anchor report + milestone claim + prediction commit/reveal
  *   node scripts/life.mjs prove <field> min|max <value> [date]   # ZK claim on an anchored report (e.g. prove crystal min 50000)
  *   node scripts/life.mjs prove-diff [k] [dateA dateB]           # ZK claim: >=k fields differ between two anchored reports
+ *   node scripts/life.mjs anchors pause [min] [reason]           # no on-chain transactions for <min> (default 30): queue waits, worker stops after its current tx
+ *   node scripts/life.mjs anchors resume                          # end the pause, drain what queued up
+ *   node scripts/life.mjs anchors status                          # pause state, queue length, worker, lifetime counters
  *
  * Config via .env (all optional):
  *   CLAUDE_API_KEY / ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID
@@ -445,6 +448,22 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
   : cmd === "attest" ? runAnchorCli([arg || path.join(dataDir, "last-report.md")])
   : cmd === "prove" ? runAnchorCli(["prove", ...process.argv.slice(3)])
   : cmd === "prove-diff" ? runAnchorCli(["diff", ...process.argv.slice(3)])
+  : cmd === "anchors" ? (async () => {
+      const [sub, n, ...rest] = process.argv.slice(3);
+      if (sub === "pause") {
+        const until = nightgate.pause(n || 30, rest.join(" "));
+        console.log(`anchoring paused until ${new Date(until).toISOString()} - ${nightgate.readQueue().length} queued, worker ${nightgate.workerActive() ? "finishes its current tx, then stops" : "idle"}`);
+      } else if (sub === "resume") {
+        const kicked = nightgate.resume();
+        console.log(`anchoring resumed - ${nightgate.readQueue().length} queued${kicked ? ", worker started" : ""}`);
+      } else {
+        const until = nightgate.pausedUntil();
+        const st = nightgate.stats();
+        console.log(`anchoring: ${until ? `PAUSED until ${new Date(until).toISOString()}` : "active"}`);
+        console.log(`queue: ${nightgate.readQueue().length} item(s), worker ${nightgate.workerActive() ? "running" : "idle"}`);
+        console.log(`lifetime: ${st.ok} ok, ${st.failed} failed (${st.feeWasted || 0} refused on chain with the fee burned)`);
+      }
+    })()
   : cmd === "dashboard" ? (async () => {
       const { execFileSync } = await import("node:child_process");
       const { scriptsDir } = await import("./lib/mc.mjs");

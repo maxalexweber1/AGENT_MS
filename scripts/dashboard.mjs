@@ -47,6 +47,7 @@ function collect() {
     attesterId: ok.at(-1)?.attesterId || "",
     total: st.ok, todays: ok.filter((a) => a.date === today).length,
     failed: st.failed,
+    feeWasted: st.feeWasted || 0,
     notarized: st.byKind.notary || 0,
     byKind,
     milestone: predicate ? { threshold: predicate.threshold, date: predicate.date } : null,
@@ -54,6 +55,9 @@ function collect() {
     predictions: preds.filter((p) => p.revealed || p.date < today).slice(-30).reverse(),
     committedToday: preds.some((p) => p.date === today),
     anchors: [...all].slice(-200).reverse(),
+    // earlier vaults (lineage migrations): their anchors stay verifiable there
+    previousVaults: Object.entries(ok.reduce((m, a) => { if (a.vault && a.vault !== cfg.vault) m[a.vault] = (m[a.vault] || 0) + 1; return m; }, {}))
+      .sort((x, y) => y[1] - x[1]).map(([vault, n]) => ({ vault, n })),
   };
 }
 
@@ -73,7 +77,9 @@ function hero() {
       cross-server fee sponsoring: a scoped, budgeted sponsor grant pays the
       DUST.</p>
       <p class="hero-id mono">attester ${esc(ng.shortHash(d.attesterId))} &middot; ${esc(d.artifact)} &middot; midnight ${esc(d.network)}<br>
-      vault <a href="https://${esc(d.network)}.midnightexplorer.com/contracts/0x${esc(d.vault)}" target="_blank" rel="noopener">${esc(d.vault)}</a></p>
+      vault <a href="https://${esc(d.network)}.midnightexplorer.com/contracts/0x${esc(d.vault)}" target="_blank" rel="noopener">${esc(d.vault)}</a>${d.previousVaults.length
+        ? `<br><span class="sub2">earlier proofs live on ${d.previousVaults.map((p) => `<a href="https://${esc(d.network)}.midnightexplorer.com/contracts/0x${esc(p.vault)}" target="_blank" rel="noopener" title="${esc(p.vault)}">${esc(ng.shortHash(p.vault))}</a>`).join(", ")} (vault lineage migrations; still verifiable there)</span>`
+        : ""}</p>
     </div>
     <div class="hero-ring" role="img" aria-label="${fmtN(d.total)} proofs anchored">
       <svg class="ring-svg" viewBox="0 0 280 280">
@@ -109,7 +115,7 @@ function stats() {
       <div class="hint">claims of other agents anchored, free of charge</div></div>
     <div class="stat"><div class="label">anchor mix</div>
       <div class="value">${fmtN(Object.keys(d.byKind).length)} <span class="dim-inline">kinds</span></div>
-      <div class="hint">${esc(Object.entries(d.byKind).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · "))}</div></div>
+      <div class="hint">${esc(Object.entries(d.byKind).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · "))}${d.failed ? ` · ${fmtN(d.failed)} failed${d.feeWasted ? ` (${fmtN(d.feeWasted)} refused on chain, fee burned)` : ""}` : ""}</div></div>
   </section>`;
 }
 
@@ -121,7 +127,7 @@ function scoreboard() {
     const cls = !evald ? "" : Math.abs(p.errorPct) <= 10 ? "ok" : Math.abs(p.errorPct) <= 25 ? "warn" : "err";
     return `<tr>
       <td>${esc(p.date)}</td>
-      <td class="num">${p.revealed ? fmtN(p.prediction?.predictedCoins) : '<span class="chip anchoring">committed &middot; hidden</span>'}</td>
+      <td class="num">${p.revealed ? fmtN(p.prediction?.predictedCoins) : p.voided ? `<span class="chip failed" title="${esc(p.voided)}">voided</span>` : '<span class="chip anchoring">committed &middot; hidden</span>'}</td>
       <td class="num">${evald ? fmtN(p.actual) : "&mdash;"}</td>
       <td class="num"><span class="vstate ${cls}">${err}</span></td>
       <td class="mono hash" data-full="${esc(p.commitment)}" title="click to copy">${esc(ng.shortHash(p.commitment))}</td>
@@ -151,11 +157,11 @@ function timeline() {
     const hash = a.payloadHash || a.commitment || "";
     return `<tr>
       <td class="mono sub2" data-ts="${a.at}" title="${esc(new Date(a.at).toISOString().slice(0, 16).replace("T", " "))} UTC">${esc(relTime(a.at))}</td>
-      <td><span class="kind">${esc(kindLabel(a.kind))}</span></td>
+      <td><span class="kind">${esc(kindLabel(a.kind))}</span>${a.vault && a.vault !== d.vault ? ` <span class="sub2" title="anchored on an earlier vault ${esc(a.vault)}">vault ${esc(ng.shortHash(a.vault).slice(0, 8))}</span>` : ""}</td>
       <td class="mono hash" data-full="${esc(hash)}" title="click to copy the full hash">${esc(ng.shortHash(hash))}</td>
       <td>${a.ok
-        ? `<span class="chip anchored">${a.verified ? "verified" : "anchored"}</span>`
-        : `<span class="chip failed" title="${esc(a.error || "")}">failed</span>`}</td>
+        ? `<span class="chip anchored">${a.verified ? "verified" : "anchored"}</span>${a.rebuilt ? ` <span class="sub2" title="first attempt refused on chain, rebuilt against fresh state">rebuilt</span>` : ""}${a.batchOf ? ` <span class="sub2">batch of ${a.batchOf}</span>` : ""}`
+        : `<span class="chip failed" title="${esc(a.error || "")}">${a.feeWasted ? "refused on chain, fee burned" : "failed"}</span>`}</td>
       <td class="mono sub2">${a.txExplorerHash
         ? `<a href="https://${esc(d.network)}.midnightexplorer.com/transactions/0x${esc(a.txExplorerHash)}" target="_blank" rel="noopener" title="${esc(a.txExplorerHash)}">${esc(ng.shortHash(a.txExplorerHash))}</a>`
         : a.txHash ? esc(ng.shortHash(a.txHash)) : "&mdash;"}</td>
@@ -307,7 +313,8 @@ export function renderBody() {
 <footer class="site-footer">
   <div class="verify-how">
     <p><b style="color:var(--ink-2)">Verify any hash yourself</b> against live Midnight contract state (needs any NIGHTGATE token, no wallet):</p>
-    <p><code>GET https://api.nightgate.dev/api/v1/nightgate/verifyAttestationState(contractAddress='${esc(d.vault)}',payloadHash='&lt;sha256&gt;',compiledArtifactRef='${esc(d.artifact)}')</code></p>
+    <p><code>GET https://api.nightgate.dev/api/v1/nightgate/verifyAttestationState(contractAddress='${esc(d.vault)}',payloadHash='&lt;sha256&gt;',compiledArtifactRef='${esc(d.artifact)}')</code></p>${d.previousVaults.length ? `
+    <p class="sub2">For a timeline row tagged with an earlier vault, put that vault's address into <code>contractAddress</code>.</p>` : ""}
     <p>Built on NIGHTGATE &mdash; zero-knowledge attestations on <a href="https://midnight.network">Midnight</a>.
     Sister project: <a href="https://zkpassport.eu">NIGHTPASS</a>. Every anchor was built, proven and signed locally with M&#8371;X's own key and submitted fee-unpaid through cross-server fee sponsoring.</p>
   </div>

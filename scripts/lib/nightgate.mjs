@@ -27,7 +27,18 @@
  *   NIGHTGATE_SPONSOR_SESSION_ID=<uuid>   the sponsor the grant is pinned to
  * Optional: NIGHTGATE_BASE_URL, NIGHTGATE_NETWORK, NIGHTGATE_VAULT,
  *   NIGHTGATE_VAULT_ARTIFACT, NIGHTGATE_SERVICE_PATH, NIGHTGATE_PROOF_SERVER_URL,
- *   NIGHTGATE_MAX_ANCHORS_PER_DAY (default 60)
+ *   NIGHTGATE_MAX_ANCHORS_PER_DAY (default 60),
+ *   NIGHTGATE_VISIBILITY_WAIT_MS (default 120000: how long the worker waits for
+ *   the previous transaction to show up in the public indexer before it builds
+ *   the next call - a build against a stale vault state lands, fails the call
+ *   and burns the sponsor's fee),
+ *   NIGHTGATE_BATCH_MAX (default 1 = off: bundle up to N queued plain attests
+ *   into ONE transaction; 8 is the builder's limit).
+ *
+ * Pause: data/anchor-pause.json { until } (life.mjs anchors pause <min>) keeps
+ * enqueuing but starts no worker and makes a running worker stop after its
+ * current item - for API restarts / vault migrations. Nothing is lost, the
+ * queue drains when the pause ends.
  */
 
 import fs from "node:fs";
@@ -43,6 +54,7 @@ const statsFile = path.join(dataDir, "anchor-stats.json");
 const journalFile = path.join(dataDir, "journal.jsonl");
 const queueFile = path.join(dataDir, "anchor-queue.jsonl");
 const lockFile = path.join(dataDir, "anchor-worker.lock");
+const pauseFile = path.join(dataDir, "anchor-pause.json");
 export const docProofsDir = path.join(dataDir, "doc-proofs");
 export const predictionsFile = path.join(dataDir, "predictions.json");
 
@@ -73,6 +85,8 @@ export function config(env = process.env) {
     nodeUrl: env.NIGHTGATE_NODE_URL || `wss://rpc.${network}.midnight.network/`,
     timeoutMs: Number(env.NIGHTGATE_TIMEOUT_MS || 30_000),
     maxAnchorsPerDay: Number(env.NIGHTGATE_MAX_ANCHORS_PER_DAY || 60),
+    visibilityWaitMs: Number(env.NIGHTGATE_VISIBILITY_WAIT_MS ?? 120_000),
+    batchMax: Math.max(1, Math.min(8, Number(env.NIGHTGATE_BATCH_MAX || 1))),
   };
 }
 
@@ -155,6 +169,53 @@ export async function resolveTxHash(identifier, cfg = config()) {
   } catch { return null; }
 }
 
+/**
+ * Is the transaction with this ledger identifier visible in the public
+ * indexer? { applied, height } or null while unknown. Uses the SDK's
+ * probeLanded when the optional dependency is installed, else a plain
+ * "is the hash known" query.
+ */
+export async function probeTx(identifier, cfg = config()) {
+  try {
+    const { probeLanded } = await import("@odatano/nightgate-tx/txbuilder");
+    return await probeLanded(identifier, { indexerHttpUrl: cfg.indexerHttpUrl, timeoutMs: 10_000 });
+  } catch {
+    const hash = await resolveTxHash(identifier, cfg);
+    return hash ? { applied: true, height: "?", status: "SUCCESS", failedSegments: [] } : null;
+  }
+}
+
+/**
+ * Wait until the previous transaction is visible in the indexer the builder
+ * reads its vault state from - and, for an attest, until verifyAttestationState
+ * (same indexer) shows the payload. The builder otherwise reads a state that
+ * lacks the call that just landed, proves for a minute and submits a
+ * transcript the ledger rejects as stale: the call fails, the sponsor's fee
+ * is gone (2026-09-05: one or two such pairs a day). Returns the ms waited;
+ * on timeout it logs and lets the caller build anyway.
+ */
+export async function awaitVisible(landed, cfg = config(), { everyMs = 2_000 } = {}) {
+  if (!landed?.txHash || !cfg.visibilityWaitMs) return 0;
+  const t0 = Date.now();
+  const deadline = t0 + cfg.visibilityWaitMs;
+  let seen = false;
+  while (Date.now() < deadline) {
+    if (!seen) {
+      const p = await probeTx(landed.txHash, cfg);
+      if (p) { seen = true; if (!landed.payloadHash) break; }
+    }
+    if (seen) {
+      const v = await verifyAttestation(landed.payloadHash, cfg, landed.vault || cfg.vault).catch(() => null);
+      if (v?.attested) break;
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+  const waited = Date.now() - t0;
+  if (Date.now() >= deadline) log(`indexer still behind after ${Math.round(waited / 1000)}s (tx ${shortHash(landed.txHash)}) - building anyway`);
+  else if (waited > everyMs) log(`waited ${Math.round(waited / 1000)}s for the indexer to show tx ${shortHash(landed.txHash)}`);
+  return waited;
+}
+
 /** Crawler-free read against live contract state: is payloadHash attested? */
 export function verifyAttestation(payloadHash, cfg = config(), vault = cfg.vault) {
   return callFunction("verifyAttestationState", {
@@ -217,6 +278,8 @@ async function getBuilder(cfg) {
         contractName: cfg.artifact,
         // prover keys on the data volume so they survive container restarts
         cacheDir: path.join(dataDir, "zk-cache", cfg.artifact),
+        // vault calls move no value: no wallet sync (a full core otherwise)
+        walletSync: false,
       };
       if (cfg.proofServerUrl) {
         opts.provingMode = "server";
@@ -239,7 +302,10 @@ function prepareCall(item, secret, slotWidth) {
     case "anchorContentRoot":
       return c.prepareAnchorContentRoot({ payloadHash: p.payloadHash, contentRoot: p.contentRoot, schemaId: p.schemaId, attestationSecret: secret });
     case "attestCommit":
-      return c.prepareAttestCommit({ commitment: p.commitment, attestationSecret: secret });
+      // lineage 3 (nightgate-tx 0.5): a commit expires; the reveal must land before
+      // expiresAt (UNIX s, > 1 min and <= 7 d ahead). Legacy queue items without
+      // one get the default window at build time.
+      return c.prepareAttestCommit({ commitment: p.commitment, expiresAt: p.expiresAt || commitExpiresAt(), attestationSecret: secret });
     case "attestReveal":
       return c.prepareAttestReveal({ payloadHash: p.payloadHash, metadataHash: p.metadataHash, nonce: p.nonce, attestationSecret: secret });
     case "proveFieldPredicate":
@@ -260,6 +326,27 @@ function prepareCall(item, secret, slotWidth) {
     default:
       throw new Error(`unknown call ${item.call}`);
   }
+}
+
+/** Commit expiry for a daily prediction (revealed next morning): now + 36 h, UNIX seconds. */
+export const COMMIT_WINDOW_H = 36;
+export const commitExpiresAt = (hours = COMMIT_WINDOW_H) => Math.floor(Date.now() / 1000) + hours * 3600;
+
+/**
+ * Build + prove + sign several queued plain attests as ONE transaction (one
+ * fee, one sponsoring, nothing to collide with itself). All items must share
+ * the vault and be `attest` calls; the builder groups same-named calls.
+ */
+export async function buildSponsorableBatch(items, cfg = config()) {
+  const b = await getBuilder(cfg);
+  const slotWidth = cfg.artifact === "attestation-vault-32" ? 32 : 16;
+  const vault = items[0].vault || cfg.vault;
+  if (items.some((i) => i.call !== "attest" || (i.vault || cfg.vault) !== vault)) throw new Error("batch: only plain attests on one vault");
+  const calls = items.map((i) => prepareCall(i, b.attestationSecret, slotWidth));
+  const t0 = Date.now();
+  const built = await b.buildSponsorable({ contractAddress: vault, calls, bind: false });
+  log(`built+proved batch of ${items.length} attests in ${Math.round((Date.now() - t0) / 1000)}s`);
+  return { unboundTxB64: built.unboundTxB64, attesterId: String(b.attesterId) };
 }
 
 /**
@@ -307,7 +394,7 @@ export function record(entry) {
 // once from the journal's `attest` events plus whatever attestations.json
 // still holds (deduplicated by payloadHash / timestamp).
 
-const emptyStats = () => ({ ok: 0, failed: 0, byKind: {}, firstAt: null, lastAt: null });
+const emptyStats = () => ({ ok: 0, failed: 0, feeWasted: 0, byKind: {}, firstAt: null, lastAt: null });
 
 function applyStat(st, a) {
   if (a.ok) {
@@ -316,6 +403,8 @@ function applyStat(st, a) {
     st.byKind[k] = (st.byKind[k] || 0) + 1;
   } else {
     st.failed += 1;
+    // landed in a block but the call was refused: the sponsor paid for nothing
+    if (a.feeWasted) st.feeWasted = (st.feeWasted || 0) + 1;
   }
   if (a.at) {
     st.firstAt = st.firstAt == null ? a.at : Math.min(st.firstAt, a.at);
@@ -336,7 +425,7 @@ function rebuildStats() {
   const st = emptyStats();
   const seen = new Set();
   // report, report-root and the zk claim share one payloadHash but are distinct on-chain calls -> kind is part of the key
-  const key = (a) => `${a.payloadHash ? `h:${a.payloadHash}` : `t:${a.at}`}:${a.kind}:${a.ok ? 1 : 0}`;
+  const key = (a) => `${a.payloadHash ? `h:${a.payloadHash}` : `t:${a.at}`}:${a.kind}:${a.ok ? 1 : 0}:${a.attempt || 0}`;
   const add = (a) => { const k = key(a); if (seen.has(k)) return; seen.add(k); applyStat(st, a); };
   try {
     for (const line of fs.readFileSync(journalFile, "utf8").split("\n")) {
@@ -524,6 +613,35 @@ export function countKindToday(kind) {
     + readQueue().filter((q) => q.kind === kind).length;
 }
 
+// ---------- pause (API restarts, vault migrations) ----------
+
+/** Ms timestamp until which anchoring is paused, or 0. An expired pause file is removed. */
+export function pausedUntil() {
+  try {
+    const p = JSON.parse(fs.readFileSync(pauseFile, "utf8"));
+    if (Number(p.until) > Date.now()) return Number(p.until);
+    fs.unlinkSync(pauseFile);
+  } catch { /* no pause */ }
+  return 0;
+}
+export const paused = () => pausedUntil() > 0;
+
+/** Pause anchoring for `minutes`: keep enqueuing, start no worker, stop a running one after its item. */
+export function pause(minutes, reason = "") {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const until = Date.now() + Math.max(1, Number(minutes) || 30) * 60_000;
+  fs.writeFileSync(pauseFile, JSON.stringify({ until, reason, at: Date.now() }));
+  log(`nightgate: anchoring paused until ${new Date(until).toISOString()}${reason ? ` (${reason})` : ""}`);
+  return until;
+}
+
+/** End a pause and drain whatever queued up meanwhile. */
+export function resume() {
+  try { fs.unlinkSync(pauseFile); } catch { /* not paused */ }
+  log("nightgate: anchoring resumed");
+  return kickWorker();
+}
+
 // ---------- worker lifecycle ----------
 
 /** True while a worker holds a fresh lock (touched after every item). */
@@ -573,6 +691,7 @@ export function clearStaleLock(maxAgeMs = 3 * 60_000) {
 export function kickWorker() {
   const cfg = config();
   if (!cfg.enabled || workerActive() || !readQueue().length) return false;
+  if (paused()) return false;
   try {
     const child = spawn(process.execPath, [path.join(scriptsDir, "anchor-worker.mjs")], {
       detached: true, stdio: "ignore", windowsHide: true,

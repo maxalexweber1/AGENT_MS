@@ -63,7 +63,7 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
     explores: explores.map((e) => ({ district: e.district, note: e.note, at: e.at })),
     sleeps: sleeps.map((e) => ({ at: e.at, minutes: e.minutes })),
     modeTime, errors: errors.map((e) => ({ at: e.at, text: e.text })),
-    attests: attests.map((e) => ({ at: e.at, ok: e.ok, kind: e.kind, payloadHash: e.payloadHash, txHash: e.txHash, network: e.network, error: e.error })),
+    attests: attests.map((e) => ({ at: e.at, ok: e.ok, kind: e.kind, payloadHash: e.payloadHash, txHash: e.txHash, network: e.network, error: e.error, feeWasted: !!e.feeWasted, attempt: e.attempt })),
     llm: l,
   };
 }
@@ -94,7 +94,10 @@ export function render(d) {
     const a = anchored.at(-1);
     lines.push(`- On-chain proofs: ${anchored.length} anchored on Midnight ${a.network || "preprod"} (${parts}; latest tx ${a.txHash?.slice(0, 16)}…)`);
   }
-  if (anchorFails.length) lines.push(`- On-chain proofs failed: ${anchorFails.length} (last: ${anchorFails.at(-1).error || "?"})`);
+  if (anchorFails.length) {
+    const burned = anchorFails.filter((a) => a.feeWasted).length;
+    lines.push(`- On-chain proofs failed: ${anchorFails.length}${burned ? ` (${burned} refused on chain with the sponsor fee burned, then rebuilt)` : ""} (last: ${anchorFails.at(-1).error || "?"})`);
+  }
   const score = nightgate.scoreboard();
   if (score) lines.push(`- Prediction track record: ${score.evaluated} evaluated, ${score.within10} within 10%, avg error ${score.avgErrorPct}%${score.last ? ` (last: ${score.last.predicted} predicted vs ${score.last.actual} actual)` : ""}`);
   lines.push(`- LLM: ${d.llm.enabled ? `${d.llm.callsToday} calls today, ${d.llm.spentTodayUsd} / ${d.llm.budgetUsd} USD` : "off"}`);
