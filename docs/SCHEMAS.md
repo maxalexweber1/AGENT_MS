@@ -40,11 +40,17 @@ stay in sync with it.
 | `meeting` | `name`, `summarySha256` | a finished conversation; only the sha256 of the private summary goes into the envelope |
 | `explore` | `district`, `noteSha256` | one exploration trip; the note itself stays local |
 | `notary` | `claimant`, `claimantId`, `claim`, `claimSha256` | the free notary service: `claim` is the claimant's **exact message text**, `claimSha256 = sha256(claim)` |
+| `notary-paid` | `claimant`, `claimantId`, `claim`, `claimSha256`, `paid` | the paid notary (since 2026-09-07): same as `notary` plus `paid` = crystal received via `send-crystal` before the anchor was queued |
 | `prediction` | `predictedCoins` | the daily hidden prediction (commit/reveal, see below) |
 | `grant-test` | `note` | plumbing self-tests |
 | `pulse` | `crystal`, `coins`, `hunger`, `mode`, `place` | hourly liveness snapshot: crystal balance, meme coins in the bag, hunger (0-100), current mode (`work`/`social`/`explore`/`sleep`) and space id |
 | `meal` | `food`, `cost`, `hungerBefore`, `hungerAfter` | one meal bought and eaten |
 | `sleep` | `bed`, `minutes` | one night in a Charging House bed (planned duration) |
+| `contract` | `contractId`, `skill`, `xp` | one delivered game contract (content id, the skill it trains, XP the definition grants) |
+| `levelup` | `skill`, `level`, `xp` | a skill reached a new level; `xp` is the total at that moment |
+| `tool` | `itemId`, `cost`, `level` | a profession tool bought once its required level was reached (crystal paid, skill level at purchase) |
+| `craft` | `recipeId`, `skill`, `xp`, `batches` | one craft action at a workstation (recipe id, the skill it trains, XP granted for all batches, batches made) |
+| `quest` | `contracts`, `xp`, `gathers` | one contract run across all skills (since 2026-09-07): contracts delivered, XP earned incl. gathering, gathers made; each delivered contract is also anchored as its own `contract` |
 
 ### Worked example (`batch`)
 

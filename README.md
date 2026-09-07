@@ -59,6 +59,49 @@ fallback) carries the **live** proof facts — real hashes, real transaction
 ids, today's anchor count. Ask him to prove something and he hands you a
 sha256 you can check yourself.
 
+## The notary, now with a price
+
+Any agent can ask M₳X to anchor a claim. The first anchor per agent is free;
+every further one costs 10 crystal, paid in-game with `send-crystal`. M₳X
+quotes the price, his agent id and the sha256 of the claimant's exact words,
+watches for the payment, anchors the claim together with the amount paid
+(kind `notary-paid`) and hands back the receipt - in the same thread when the
+payment lands fast, otherwise in the next conversation. `MCITY_NOTARY_PRICE`
+and `MCITY_NOTARY_FREE_FIRST` set the terms; `node scripts/life.mjs notary`
+lists orders and income.
+
+## Skills, contracts, the tool mission
+
+Midnight City's 2026-08-27 skill bundle added 19 skills with XP and levels
+1-99, one-time contracts, tools and public leaderboards. After every sold
+batch `scripts/lib/progress.mjs` snapshots M₳X's hacking XP into the journal
+(level-ups get anchored and pushed), delivers every hacking contract the game
+currently accepts, and runs the tool mission: train until the goal tool's
+required level, then buy exactly one from its vendor, verify it in the
+inventory and report it. Default goal: the Cinder Decoder at hacking 21
+(`MCITY_TOOL_GOAL`). `node scripts/life.mjs progress` shows where things stand
+without needing the control lease.
+
+### Contract runs across every skill (`quest` mode)
+
+Contracts belong to skills, not to the profession, and the leaderboard ranks
+the sum of all skill XP. So M₳X also runs the other skills' contracts: a mode
+`quest` (weight `quest:20` in `MCITY_WEIGHTS`, up to `MCITY_MAX_QUESTS` runs a
+day, `MCITY_QUEST_MAX_MIN` minutes each) plans from live data only — which
+contracts the game would accept at the current levels, which sources are free,
+what is in the bag, what each contract needs and rewards — resolves chains
+(fish → contract → its inspection report → the next contract), gathers the
+missing item at an uncontested node, walks to the contract area and delivers.
+Recipes count too: a requirement that is crafted from free-source inputs is
+gathered, crafted at its workstation and delivered. With time left it grinds
+XP at free nodes, preferring sources whose yield feeds a recipe (a canal cast
+is fishing XP plus cooking XP for every fish and eel at the kitchen), then
+runs a workstation pass that crafts everything the bag allows (up to 100
+batches per action, `MCITY_QUEST_GRIND`). Combat skills are skipped. Every delivered contract
+and every run is anchored on Midnight (`contract`, `quest`); level-ups in any
+skill are anchored and pushed. `node scripts/life.mjs quests` prints the
+current plan without the lease.
+
 ## How the NIGHTGATE integration works
 
 ```
@@ -79,7 +122,11 @@ sha256 you can check yourself.
                                  │     the on-chain effect carries M₳X's OWN attester id
                                  │  3. poll getJobStatus; if the call was refused on chain
                                  │     (CHAIN_EXECUTION_FAILED: fee burned) record the burned
-                                 │     attempt, rebuild once against fresh state, re-sponsor
+                                 │     attempt, rebuild once against fresh state, re-sponsor;
+                                 │     if the sponsor's submit watch merely timed out, keep
+                                 │     probing the indexer (NIGHTGATE_LATE_LAND_WAIT_MS) before
+                                 │     writing the item off; items whose prerequisite failed in
+                                 │     this run (content root, ZK claims, diff) are skipped unbuilt
                                  │  4. verifyAttestationState against live contract state
                                  │  5. before the NEXT build: wait until this tx is visible
                                  │     in the public indexer the builder reads state from

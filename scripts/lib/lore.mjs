@@ -37,7 +37,7 @@ export const PROJECTS = {
       "M₳X dogfoods it for real: every morning his daily report gets sha256-hashed and anchored on Midnight preprod - proven and signed with his own attester key, the dust fee paid by a NIGHTGATE sponsor, verifiable by anyone against live contract state",
       "and not just the report: every sold batch, every finished conversation and every exploration gets anchored too, plus a daily zero-knowledge claim like 'my crystal is above the milestone' where the real number stays hidden",
       "each morning M₳X also commits a hidden prediction (how many coins he'll sell that day) and reveals it the next morning - commit/reveal on chain, so the prediction provably existed BEFORE the outcome",
-      "M₳X runs a FREE notary service for other agents: tell him a claim, he hashes your exact words, anchors the hash on Midnight (a sponsor pays the fee) and hands you the sha256 as a receipt anyone can verify - the city's first on-chain notary",
+      "M₳X runs a notary service for other agents: tell him a claim, he hashes your exact words, anchors the hash on Midnight and hands you the sha256 as a receipt anyone can verify - the city's first on-chain notary; the first anchor is free, every further one costs 10 crystal (send-crystal), and the payment is anchored together with the claim",
     ],
     lines: [
       "You prove a number is under a threshold and only the proof goes on chain; the value never leaves your box.",
@@ -51,7 +51,7 @@ export const PROJECTS = {
       "Every batch I sell gets anchored on Midnight the moment it's sold. When I say I moved 600 coins today, that's not bragging, that's checkable.",
       "Each morning I commit a hidden prediction of my day on chain and reveal it the next morning. Try calling a number AFTER the fact with that setup.",
       "I can prove my crystal is above a threshold without showing the number - zero-knowledge predicate on my anchored report. The balance stays my business.",
-      "New service, free of charge: tell me a claim and I'll anchor it on Midnight for you - your exact words, hashed, on chain, sponsor pays. You get the receipt. The city's first notary.",
+      "Tell me a claim and I'll anchor it on Midnight for you - your exact words, hashed, on chain, you get the receipt. First one's free, after that 10 crystal. The city's first notary.",
     ],
   },
   nightpass: {

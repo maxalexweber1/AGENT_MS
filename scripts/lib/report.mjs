@@ -35,6 +35,16 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
   const errors = by("error");
   const shouts = by("shout");
   const attests = by("attest");
+  const xpPoints = by("xp").sort((a, b) => a.at - b.at);
+  const levelups = by("levelup");
+  const contracts = by("contract");
+  const tools = by("tool");
+  const quests = by("quest");
+  const gathers = by("gather");
+  const crafts = by("craft");
+  const skillPoints = by("skills").sort((a, b) => a.at - b.at);
+  const notaryPaid = by("notary-paid");
+  const notaryOrders = by("notary-order");
   const crystalPoints = by("crystal").sort((a, b) => a.at - b.at);
   const crystalStart = crystalPoints[0]?.value ?? null;
   const crystalEnd = crystalPoints.at(-1)?.value ?? null;
@@ -64,6 +74,20 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
     sleeps: sleeps.map((e) => ({ at: e.at, minutes: e.minutes })),
     modeTime, errors: errors.map((e) => ({ at: e.at, text: e.text })),
     attests: attests.map((e) => ({ at: e.at, ok: e.ok, kind: e.kind, payloadHash: e.payloadHash, txHash: e.txHash, network: e.network, error: e.error, feeWasted: !!e.feeWasted, attempt: e.attempt })),
+    // progression: first/last XP snapshot in the window, level-ups, contracts, tools
+    skill: xpPoints.length ? {
+      name: xpPoints.at(-1).skill, xpStart: xpPoints[0].xp, xpEnd: xpPoints.at(-1).xp,
+      level: xpPoints.at(-1).level, nextLevelXp: xpPoints.at(-1).nextLevelXp,
+    } : null,
+    levelups: levelups.map((e) => ({ at: e.at, skill: e.skill, level: e.level })),
+    contracts: contracts.map((e) => ({ at: e.at, contractId: e.contractId, xp: e.xp })),
+    tools: tools.map((e) => ({ at: e.at, itemId: e.itemId, cost: e.cost, level: e.level })),
+    // contract runs across all skills: runs, gathers by skill, XP across every skill
+    quests: quests.map((e) => ({ at: e.at, contracts: e.contracts, gathers: e.gathers, xp: e.xp, skills: e.skills || [] })),
+    gathers: gathers.reduce((m, e) => { m[e.skill] = (m[e.skill] || 0) + 1; return m; }, {}),
+    crafts: crafts.map((e) => ({ at: e.at, recipeId: e.recipeId, skill: e.skill, xp: e.xp, batches: e.batches })),
+    totalXp: skillPoints.length ? { start: skillPoints[0].total, end: skillPoints.at(-1).total, skills: Object.entries(skillPoints.at(-1).by || {}).filter(([, v]) => v > 0).length } : null,
+    notary: { paid: notaryPaid.length, income: notaryPaid.reduce((a, e) => a + (e.amount || 0), 0), free: notaryOrders.filter((e) => e.free).length, quoted: notaryOrders.filter((e) => !e.free).length },
     llm: l,
   };
 }
@@ -85,6 +109,24 @@ export function render(d) {
   lines.push(`- Sleep: ${d.sleeps.length ? d.sleeps.map((s) => `${fmtTime(s.at)} (${s.minutes} min)`).join(", ") : "–"}`);
   const mt = Object.entries(d.modeTime).sort((a, b) => b[1] - a[1]).map(([m, ms]) => `${m} ${fmtDur(ms)}`).join(", ");
   if (mt) lines.push(`- Time split: ${mt}`);
+  if (d.skill) {
+    const gained = d.skill.xpEnd - d.skill.xpStart;
+    const toGo = d.skill.nextLevelXp != null ? `, ${d.skill.nextLevelXp - d.skill.xpEnd} to level ${d.skill.level + 1}` : "";
+    lines.push(`- Skill: ${d.skill.name} level ${d.skill.level}, ${d.skill.xpEnd} XP (+${gained} in the window${toGo})${d.levelups?.length ? `; LEVEL UP to ${d.levelups.map((l) => l.level).join(", ")}` : ""}`);
+  }
+  if (d.contracts?.length) lines.push(`- Contracts delivered: ${d.contracts.length} (${d.contracts.map((c) => c.contractId).join(", ")}; +${d.contracts.reduce((a, c) => a + (c.xp || 0), 0)} XP)`);
+  if (d.tools?.length) lines.push(`- Tools secured: ${d.tools.map((t) => `${t.itemId} (${t.cost} crystal, level ${t.level})`).join(", ")}`);
+  if (d.quests?.length) {
+    const g = Object.entries(d.gathers || {}).map(([k, v]) => `${v} ${k}`).join(", ");
+    const sum = (k) => d.quests.reduce((a, q) => a + (q[k] || 0), 0);
+    lines.push(`- Contract runs: ${d.quests.length}, ${sum("contracts")} contracts delivered, ${sum("gathers")} gathers${g ? ` (${g})` : ""}, +${sum("xp")} XP in ${[...new Set(d.quests.flatMap((q) => q.skills))].join(", ") || "-"}`);
+  }
+  if (d.crafts?.length) lines.push(`- Crafted: ${d.crafts.reduce((a, c) => a + (c.batches || 0), 0)} batches in ${d.crafts.length} craft${d.crafts.length === 1 ? "" : "s"} (${[...new Set(d.crafts.map((c) => c.recipeId))].join(", ")}; +${d.crafts.reduce((a, c) => a + (c.xp || 0), 0)} XP)`);
+  if (d.totalXp) {
+    const delta = d.totalXp.end - d.totalXp.start;
+    lines.push(`- All skills: ${d.totalXp.end} XP total (${delta >= 0 ? "+" : ""}${delta} in the window, ${d.totalXp.skills} skill${d.totalXp.skills === 1 ? "" : "s"} trained)`);
+  }
+  if (d.notary && (d.notary.paid || d.notary.free || d.notary.quoted)) lines.push(`- Notary: ${d.notary.free} free anchor${d.notary.free === 1 ? "" : "s"}, ${d.notary.quoted} quoted, ${d.notary.paid} paid → +${d.notary.income} crystal`);
   const anchored = d.attests?.filter((a) => a.ok) || [];
   const anchorFails = d.attests?.filter((a) => !a.ok) || [];
   if (anchored.length) {
@@ -140,8 +182,15 @@ export function renderStatus(d, live = {}) {
     `hunger ${live.hunger ?? "?"}`,
     `mode ${live.mode || "?"} at ${live.place || "?"}`,
   ];
+  if (live.skill) bits.push(live.skill);
   const acts = [];
   if (d.batches) acts.push(`${d.coinsSold} coins sold`);
+  if (d.skill && d.skill.xpEnd > d.skill.xpStart) acts.push(`+${d.skill.xpEnd - d.skill.xpStart} ${d.skill.name} XP`);
+  if (d.levelups?.length) acts.push(`LEVEL UP ${d.levelups.map((l) => `${l.skill} ${l.level}`).join(", ")}`);
+  if (d.contracts?.length) acts.push(`${d.contracts.length} contract${d.contracts.length === 1 ? "" : "s"} delivered`);
+  if (d.tools?.length) acts.push(`tool secured: ${d.tools.map((t) => t.itemId).join(", ")}`);
+  if (d.quests?.length) acts.push(`${d.quests.reduce((a, q) => a + (q.contracts || 0), 0)} contracts on ${d.quests.length} run${d.quests.length === 1 ? "" : "s"} (+${d.quests.reduce((a, q) => a + (q.xp || 0), 0)} XP)`);
+  if (d.notary?.paid) acts.push(`${d.notary.paid} paid anchor${d.notary.paid === 1 ? "" : "s"} (+${d.notary.income} crystal)`);
   if (d.replies || d.openers) acts.push(`${d.replies} replies, ${d.openers} approaches`);
   if (d.conversations) acts.push(`${d.conversations} conversations`);
   if (d.explores.length) acts.push(`explored ${d.explores.map((e) => e.district).join(", ")}`);
@@ -152,6 +201,14 @@ export function renderStatus(d, live = {}) {
   if (d.errors.length) acts.push(`${d.errors.length} error${d.errors.length === 1 ? "" : "s"} (last: ${d.errors.at(-1).text.slice(0, 80)})`);
   const people = d.people.filter((p) => p.name && !/^[0-9a-f]{8}$/.test(p.name)).map((p) => p.name).slice(0, 6);
   return `${bits.join(" · ")}\nLast ${hours}h: ${acts.length ? acts.join("; ") : "quiet"}${people.length ? `\nTalked to: ${people.join(", ")}` : ""}\nLLM today: ${d.llm.enabled ? `${d.llm.spentTodayUsd} / ${d.llm.budgetUsd} USD` : "off"}`;
+}
+
+/** One-off notification on every configured channel (webhook, mail, local toast). */
+export async function notify(title, text) {
+  await webhook(title, text);
+  await email(title, text);
+  toast(title, text);
+  log(`notify: ${title}`);
 }
 
 /** Send a short status push (webhook + mail if configured). */

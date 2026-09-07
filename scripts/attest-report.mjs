@@ -147,7 +147,14 @@ async function daily() {
   // 3c. yesterday vs today: at least DIFF_MIN_FIELDS fields changed (which ones stays hidden)
   const prevDate = listDocProofs().filter((d) => d < date).at(-1);
   const prev = prevDate ? readDocProof(prevDate) : null;
-  if (prev && DIFF_MIN_FIELDS > 0 && !ng.history().some((a) => a.ok && a.kind === "report-diff" && a.date === date)) {
+  // both content roots must sit on the SAME vault: after a vault migration the
+  // previous report lives on the old one and the diff would only fail the
+  // builder's pre-check ("no content root A") - 2026-09-07, the day after lineage 3
+  const prevRoot = prev && [...ng.history()].reverse().find((a) => a.ok && a.kind === "report-root" && a.payloadHash === prev.payloadHash);
+  const prevVault = prevRoot?.vault || (prevRoot ? cfg.vault : null);
+  if (prev && prevVault && prevVault !== cfg.vault) {
+    log(`skipping the ${prevDate}<->${date} diff claim: the ${prevDate} content root lives on vault ${ng.shortHash(prevVault)}, not the current one`);
+  } else if (prev && DIFF_MIN_FIELDS > 0 && !ng.history().some((a) => a.ok && a.kind === "report-diff" && a.date === date)) {
     ng.enqueue({
       kind: "report-diff", call: "proveFieldsDiffer",
       params: { payloadHashA: prev.payloadHash, payloadHashB: dp.payloadHash, k: DIFF_MIN_FIELDS },

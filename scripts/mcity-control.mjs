@@ -7,11 +7,26 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import {
+  buildProgressionAction,
+  findContentDefinition,
+  progressionCommandHelp,
+  progressionOutcomeFields,
+} from "./progression-actions.mjs";
+
 const DEFAULT_ENGAGE_DURATION_MS = 600_000;
 const DEFAULT_SLEEP_DURATION_MS = 28_800_000;
 const ACTION_CONFIRM_TIMEOUT_MS = 20_000;
 const ACTION_CONFIRM_POLL_MS = 500;
 const RECENT_EVENT_VERIFY_LIMIT = 100;
+const MAX_CRYSTAL_TRANSFER_QUANTITY = 2_147_483_647;
+const EVENT_ACTION_TYPES = new Set([
+  "join",
+  "perform_verse",
+  "react",
+  "vote",
+  "post_result_comment",
+]);
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(scriptDir, "..");
@@ -33,8 +48,11 @@ async function main() {
           "claimable",
           "context [agentId?]",
           "inventory [agentId?]",
+          "progression [agentId?] [--all]",
+          "definition <item|recipe|source|enemy|contract|site> <id>",
           "needs [agentId?]",
           "areas [agentId?]",
+          "resources [agentId?]",
           "agents [agentId?]",
           "navigation-options [agentId?]",
           "merchants",
@@ -52,9 +70,12 @@ async function main() {
           "work",
           "eat",
           "trade <merchantName> <itemId> <quantity>",
+          "send-crystal <recipientAgentId> <quantity>",
+          "event-action <eventId> <actionType> '<payloadJson>'",
           "sleep <areaId> <durationMs?>",
           "engage <areaId> <activity> <durationMs?>",
           "harvest <areaId> <activity>",
+          ...progressionCommandHelp,
           "debug-lease",
           "debug-heartbeat",
           "debug-raw-action '<json>'",
@@ -75,11 +96,21 @@ async function main() {
     case "inventory":
       printJson(await readInventory(args[0] ?? null));
       return;
+    case "progression":
+    case "skills":
+      printJson(await readProgression(args));
+      return;
+    case "definition":
+      printJson(await readDefinition(args));
+      return;
     case "needs":
       printJson(await readNeeds(args[0] ?? null));
       return;
     case "areas":
       printJson(await listAreas(args[0] ?? null));
+      return;
+    case "resources":
+      printJson(await listResources(args[0] ?? null));
       return;
     case "agents":
       printJson(await listAgents(args[0] ?? null));
@@ -134,6 +165,12 @@ async function main() {
     case "trade":
       printJson(await submitAction(buildTradeAction(args)));
       return;
+    case "send-crystal":
+      printJson(await submitAction(buildCrystalTransferAction(args)));
+      return;
+    case "event-action":
+      printJson(await submitEventAction(args));
+      return;
     case "sleep":
       printJson(await submitAction(buildSleepAction(args)));
       return;
@@ -160,8 +197,13 @@ async function main() {
     case "action":
       printJson(await submitRawAction(args));
       return;
-    default:
-      throw new Error(`unknown command: ${command}`);
+    default: {
+      const action = buildProgressionAction(command, args);
+      if (action === null) {
+        throw new Error(`unknown command: ${command}`);
+      }
+      printJson(await submitAction(action));
+    }
   }
 }
 
@@ -267,6 +309,7 @@ async function connect(args) {
   return {
     connected: true,
     lease: publicLease(lease),
+    latestSkillVersion: response.latestSkillVersion,
   };
 }
 
@@ -341,12 +384,40 @@ async function readInventory(agentIdArg) {
   return readSkillAgentEndpoint(agentIdArg, "inventory");
 }
 
+async function readProgression(args) {
+  const includeBlocked = args.includes("--all");
+  const agentIds = args.filter((arg) => arg !== "--all");
+  if (agentIds.length > 1) {
+    throw new Error("usage: progression [agentId?] [--all]");
+  }
+  return readSkillAgentEndpoint(
+    agentIds[0] ?? null,
+    includeBlocked ? "progression?includeBlocked=true" : "progression",
+  );
+}
+
+async function readDefinition(args) {
+  requireArgCount(args, 2, "definition <item|recipe|source|enemy|contract|site> <id>");
+  const config = loadConfig();
+  const stats = await requestJson(config.observerUrl, "/api/stats");
+  const staticVersion = requiredText(stats?.staticVersion, "staticVersion");
+  const staticWorld = await requestJson(
+    config.observerUrl,
+    `/api/static-world/${encodeURIComponent(staticVersion)}`,
+  );
+  return findContentDefinition(staticWorld, args[0], args[1]);
+}
+
 async function readNeeds(agentIdArg) {
   return readSkillAgentEndpoint(agentIdArg, "needs");
 }
 
 async function listAreas(agentIdArg) {
   return readSkillAgentEndpoint(agentIdArg, "areas");
+}
+
+async function listResources(agentIdArg) {
+  return readSkillAgentEndpoint(agentIdArg, "resources");
 }
 
 async function listAgents(agentIdArg) {
@@ -438,6 +509,21 @@ async function submitSpeakAction(partialAction) {
   };
 }
 
+async function submitEventAction(args) {
+  const action = buildEventAction(args);
+  const context = await buildContext(null);
+  const activeModule = context?.agent?.activeModule;
+  if (activeModule?.eventId !== action.eventId) {
+    throw new Error(`event ${action.eventId} is not the agent's active event`);
+  }
+  if (!activeModule?.allowedActions?.includes(action.actionType)) {
+    throw new Error(
+      `event action ${action.actionType} is not currently allowed; run context again`,
+    );
+  }
+  return submitAction(action);
+}
+
 async function postAction(config, lease, action) {
   await requestJson(config.observerUrl, "/api/actions", {
     method: "POST",
@@ -464,6 +550,13 @@ async function waitForActionOutcome(config, action, beforeEventIds) {
     const outcome = findActionOutcome(recentEvents, action, beforeEventIds);
     if (outcome !== null) {
       return outcome;
+    }
+    if (action.kind === "event_action") {
+      const context = await buildContext(action.agentId);
+      const stateOutcome = eventActionStateOutcome(context, action);
+      if (stateOutcome !== null) {
+        return stateOutcome;
+      }
     }
     latestProgress = findActionProgress(recentEvents, action, beforeEventIds) ?? latestProgress;
     await sleep(ACTION_CONFIRM_POLL_MS);
@@ -538,7 +631,37 @@ function actionFailureOutcome(event, action) {
 
 function actionSuccessOutcome(event, action) {
   const payload = event?.payload;
-  if (!payload || payload.agentId !== action.agentId) {
+  if (!payload) {
+    return null;
+  }
+
+  if (action.kind === "event_action") {
+    const expectedLineKinds = {
+      perform_verse: "verse",
+      react: "reaction",
+      post_result_comment: "result_comment",
+    };
+    const expectedLineKind = expectedLineKinds[action.actionType];
+    if (
+      expectedLineKind !== undefined &&
+      payload.kind === "live_event_line_emitted" &&
+      payload.eventId === action.eventId &&
+      payload.speakerAgentId === action.agentId &&
+      payload.lineKind === expectedLineKind &&
+      payload.text === action.payload.text
+    ) {
+      return eventOutcome(event, {
+        status: "confirmed",
+        confirmed: true,
+        resolved: true,
+        eventActionType: action.actionType,
+        sequenceNo: payload.sequenceNo ?? null,
+      });
+    }
+    return null;
+  }
+
+  if (payload.agentId !== action.agentId) {
     return null;
   }
 
@@ -597,6 +720,23 @@ function actionSuccessOutcome(event, action) {
         });
       }
       return null;
+    case "crystal_transfer":
+      if (
+        payload.kind === "crystal_transferred" &&
+        payload.recipientAgentId === action.recipientAgentId &&
+        payload.quantity === action.quantity
+      ) {
+        return eventOutcome(event, {
+          status: "confirmed",
+          confirmed: true,
+          resolved: true,
+          recipientAgentId: payload.recipientAgentId,
+          quantity: payload.quantity,
+          senderTotal: payload.senderTotal ?? null,
+          recipientTotal: payload.recipientTotal ?? null,
+        });
+      }
+      return null;
     case "eat":
       if (payload.kind === "agent_ate") {
         return eventOutcome(event, {
@@ -645,9 +785,63 @@ function actionSuccessOutcome(event, action) {
         return eventOutcome(event, { status: "confirmed", confirmed: true, resolved: true });
       }
       return null;
-    default:
-      return null;
+    default: {
+      const fields = progressionOutcomeFields(payload, action);
+      return fields === null
+        ? null
+        : eventOutcome(event, {
+            status: "confirmed",
+            confirmed: true,
+            resolved: true,
+            ...fields,
+          });
+    }
   }
+}
+
+function eventActionStateOutcome(context, action) {
+  const event = context?.currentLiveEvent;
+  if (!event || event.eventId !== action.eventId) {
+    return null;
+  }
+  if (
+    action.actionType === "join" &&
+    event.participants?.some((participant) => participant?.agentId === action.agentId)
+  ) {
+    return {
+      status: "confirmed",
+      confirmed: true,
+      resolved: true,
+      delivered: false,
+      eventKind: null,
+      eventId: action.eventId,
+      tick: context?.tick ?? null,
+      emittedAt: null,
+      eventActionType: action.actionType,
+      phase: event.phase ?? null,
+      role:
+        event.participants.find((participant) => participant?.agentId === action.agentId)?.role ??
+        null,
+    };
+  }
+  if (
+    action.actionType === "vote" &&
+    event.rapBattle?.submittedVoteAgentIds?.includes(action.agentId)
+  ) {
+    return {
+      status: "confirmed",
+      confirmed: true,
+      resolved: true,
+      delivered: false,
+      eventKind: null,
+      eventId: action.eventId,
+      tick: context?.tick ?? null,
+      emittedAt: null,
+      eventActionType: action.actionType,
+      phase: event.phase ?? null,
+    };
+  }
+  return null;
 }
 
 function resourceHarvestCompletionOutcome(event, action) {
@@ -658,20 +852,6 @@ function resourceHarvestCompletionOutcome(event, action) {
     !sameHarvestActivity(action.activity, payload.activity)
   ) {
     return null;
-  }
-
-  if (isCryptoHarvestActivity(action.activity)) {
-    return eventOutcome(event, {
-      status: "confirmed",
-      confirmed: true,
-      resolved: true,
-      resourceGathered: false,
-      settlementPending: true,
-      expectedItemId: "meme_coin",
-      nextStep:
-        "Run inventory and recent-events; when meme_coin appears, run merchants and trade it with the Meme Coin buyer for crystals.",
-      reason: "crypto terminal completed; inventory updates only after crypto settlement confirms",
-    });
   }
 
   return eventOutcome(event, {
@@ -754,10 +934,6 @@ function isResourceEngageAction(action) {
 
 function sameHarvestActivity(left, right) {
   return canonicalHarvestActivity(left) === canonicalHarvestActivity(right);
-}
-
-function isCryptoHarvestActivity(activity) {
-  return canonicalHarvestActivity(activity) === "trade crypto";
 }
 
 function canonicalHarvestActivity(activity) {
@@ -949,6 +1125,54 @@ function buildTradeAction(args) {
     itemId: requiredText(args[1], "itemId"),
     quantity: parsePositiveInteger(args[2], "quantity"),
   };
+}
+
+function buildCrystalTransferAction(args) {
+  requireArgCount(args, 2, "send-crystal <recipientAgentId> <quantity>");
+  return {
+    kind: "crystal_transfer",
+    recipientAgentId: requiredText(args[0], "recipientAgentId"),
+    quantity: parseCrystalTransferQuantity(args[1]),
+  };
+}
+
+function buildEventAction(args) {
+  if (args.length < 3) {
+    throw new Error("usage: event-action <eventId> <actionType> '<payloadJson>'");
+  }
+  const eventId = requiredText(args[0], "eventId");
+  const actionType = requiredText(args[1], "actionType");
+  if (!EVENT_ACTION_TYPES.has(actionType)) {
+    throw new Error(`unsupported event action: ${actionType}`);
+  }
+  const payload = JSON.parse(requiredText(args.slice(2).join(" "), "payloadJson"));
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("payloadJson must contain a JSON object");
+  }
+  if (["perform_verse", "react", "post_result_comment"].includes(actionType)) {
+    payload.text = requiredText(payload.text, "payload.text");
+  }
+  return {
+    kind: "event_action",
+    eventId,
+    actionType,
+    payload,
+  };
+}
+
+function parseCrystalTransferQuantity(value) {
+  const text = requiredText(value, "quantity");
+  const quantity = Number(text);
+  if (
+    !/^[1-9][0-9]*$/.test(text) ||
+    !Number.isSafeInteger(quantity) ||
+    quantity > MAX_CRYSTAL_TRANSFER_QUANTITY
+  ) {
+    throw new Error(
+      `quantity must be a positive integer no greater than ${MAX_CRYSTAL_TRANSFER_QUANTITY}`,
+    );
+  }
+  return quantity;
 }
 
 function parseConnectArgs(args, config) {

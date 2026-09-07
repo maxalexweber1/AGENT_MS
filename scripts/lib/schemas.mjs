@@ -31,11 +31,20 @@ export const SCHEMAS = {
   meeting: ["name", "summarySha256"],
   explore: ["district", "noteSha256"],
   notary: ["claimant", "claimantId", "claim", "claimSha256"],
+  "notary-paid": ["claimant", "claimantId", "claim", "claimSha256", "paid"],
   prediction: ["predictedCoins"],
   "grant-test": ["note"],
   pulse: ["crystal", "coins", "hunger", "mode", "place"],
   meal: ["food", "cost", "hungerBefore", "hungerAfter"],
   sleep: ["bed", "minutes"],
+  // progression (skill system since 2026-08-27, used by M₳X since 2026-09-07)
+  contract: ["contractId", "skill", "xp"],
+  levelup: ["skill", "level", "xp"],
+  tool: ["itemId", "cost", "level"],
+  // one contract run across all skills (quest.mjs, since 2026-09-07): contracts delivered, XP earned, gathers made
+  quest: ["contracts", "xp", "gathers"],
+  // one craft action at a workstation (quest.mjs): recipe, its skill, XP granted, batches made
+  craft: ["recipeId", "skill", "xp", "batches"],
 };
 
 /** Metadata envelope (hashed into metadataHash), same for every kind. */

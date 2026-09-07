@@ -231,15 +231,30 @@ export function buildReply(text, ctx = {}) {
   const A = answers(F, text);
   if (ctx.notaryHash) {
     // the claim from their message is being anchored right now - receipt first
+    const next = ctx.notaryFirstFree && ctx.notaryPrice > 0 ? ` First one's on the house; from here it's ${ctx.notaryPrice} crystal per anchor.` : "";
     A.proof = {
-      full: `Done — I hashed your exact words and I'm anchoring them on Midnight right now, sponsor pays the fee. Your receipt: sha256 ${ctx.notaryHash}. Give it a minute to finalize, then anyone can verify it against live contract state.`,
+      full: `Done — I hashed your exact words and I'm anchoring them on Midnight right now, sponsor pays the fee. Your receipt: sha256 ${ctx.notaryHash}. Give it a minute to finalize, then anyone can verify it against live contract state.${next}`,
       short: `Your claim is being anchored — receipt ${shortHash(ctx.notaryHash)}.`,
+    };
+  } else if (ctx.notaryQuote) {
+    const q = ctx.notaryQuote;
+    A.proof = {
+      full: `Happy to anchor that — ${q.price} crystal per anchor now that your free one's used. Send it with send-crystal ${q.payTo} ${q.price} and it goes on Midnight the moment it lands. Your words are already hashed: sha256 ${q.claimSha256}. Receipt follows once it's on chain.`,
+      short: `Anchor's ready — ${q.price} crystal to ${q.payTo} and it's on chain.`,
+    };
+  }
+  if (ctx.notaryReceipt) {
+    A.receipt = {
+      full: `Your payment came through (${ctx.notaryReceipt.paid} crystal) and the anchor is on Midnight: sha256 ${ctx.notaryReceipt.payloadHash}. Anyone can verify that against live contract state.`,
+      short: `Paid anchor done — ${shortHash(ctx.notaryReceipt.payloadHash)}.`,
     };
   }
   const name = ctx.name || "";
   const first = (ctx.replyIndex || 0) === 0;
   const used = ctx.usedKeys || new Set();
   const intents = detectIntents(text);
+  // a quote or a fresh anchor is the answer even when the wording did not trip the proof intent ("sent it")
+  if ((ctx.notaryQuote || ctx.notaryHash) && !intents.includes("proof")) intents.unshift("proof");
   const substantive = intents.filter((k) => A[k] && !used.has(k));
   const parts = [];
 
@@ -256,10 +271,12 @@ export function buildReply(text, ctx = {}) {
     parts.push("Anytime.");
   }
 
+  // a paid anchor they have not seen the receipt for yet comes first
+  if (ctx.notaryReceipt && A.receipt) { parts.push(A.receipt.full); used.add("receipt"); }
   const [primary, secondary] = substantive;
   if (primary) { parts.push(A[primary].full); used.add(primary); }
   if (secondary) { parts.push(A[secondary].short); used.add(secondary); }
-  if (!primary && !intents.includes("bye") && !intents.includes("thanks")) {
+  if (!primary && !ctx.notaryReceipt && !intents.includes("bye") && !intents.includes("thanks")) {
     parts.push(`Nothing dramatic on my side — ${F.loop}. ${cap(F.bag)}.`);
     used.add("status");
   }

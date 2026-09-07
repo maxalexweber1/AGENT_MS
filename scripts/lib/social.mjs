@@ -10,6 +10,7 @@ import * as mem from "./memory.mjs";
 import * as llm from "./llm.mjs";
 import * as journal from "./journal.mjs";
 import * as nightgate from "./nightgate.mjs";
+import * as notary from "./notary.mjs";
 import { senderName, detectTags, buildReply, buildOpener, buildShout, extractiveSummary } from "./rules.mjs";
 
 export const cfg = {
@@ -161,23 +162,22 @@ async function answerThread(t, otherId) {
   const status = statusProvider();
   const isLast = mine >= limit - 1;
 
-  // free notary service: someone asks M₳X to anchor/notarize a claim - hash
-  // their exact words, queue the anchor (sponsor pays) and hand back the sha256
-  let notaryHash = null;
+  // the notary: someone asks M₳X to anchor/notarize a claim - hash their exact
+  // words; first anchor per agent is free (queued right now), further ones are
+  // quoted (price, M₳X's id, the claim hash) and anchored once the crystal lands
+  let notaryHash = null, notaryQuote = null, notaryFirstFree = false;
+  let notaryReceipt = notary.takePendingReceipt(otherId);
   if (/notari[sz]e|anchor (this|that|it|my|me)|put (this|that|it|my) .*on.?chain|on.?chain (it|this|that)|can you (anchor|hash)|hash (this|that|it|my)|make (it|this|that) official|need a receipt|witness (this|my)/i.test(latest)) {
     if (!state.notarizedThreads) state.notarizedThreads = new Set();
-    if (!state.notarizedThreads.has(t.threadId) && nightgate.countKindToday("notary") < 30) {
-      const r = nightgate.enqueueDoc("notary", {
-        date: new Date().toISOString().slice(0, 10), ts: Date.now(),
-        claimant: c.name || otherId.slice(-8), claimantId: otherId,
-        claim: latest.slice(0, 400), claimSha256: nightgate.sha256hex(latest),
-      });
-      if (r) {
-        notaryHash = r.payloadHash;
-        state.notarizedThreads.add(t.threadId);
-        log(`notary: anchoring claim by ${c.name || otherId.slice(-8)} - ${notaryHash}`);
-      }
+    if (!state.notarizedThreads.has(t.threadId)) {
+      const r = notary.request({ threadId: t.threadId, claimantId: otherId, claimant: c.name || otherId.slice(-8), claim: latest });
+      if (r.mode === "free") { notaryHash = r.payloadHash; notaryFirstFree = !!r.firstFree; state.notarizedThreads.add(t.threadId); }
+      else if (r.mode === "quote") notaryQuote = r.order;
     }
+  } else if (notary.openOrders().some((o) => o.claimantId === otherId) && /\b(sent|paid|transferred|done|there you go|crystal(s)? (is|are) (on|with) (its|their) way)\b/i.test(latest)) {
+    // "sent" - look right now instead of on the next 20 s check
+    try { if (await notary.checkPayments({ force: true })) notaryReceipt = notary.takePendingReceipt(otherId); } catch (e) { log("notary check failed:", e.message); }
+    if (!notaryReceipt) notaryQuote = notary.openOrders().find((o) => o.claimantId === otherId) || null;
   }
 
   let reply = state.drafts.get(t.latestMessageId) || null;
@@ -185,7 +185,7 @@ async function answerThread(t, otherId) {
     reply = await llm.reply({
       transcript, name: c.name, contactBrief: briefBefore, status,
       metCount: mem.memory.contacts[otherId]?.met || 0,
-      proofBrief: nightgate.proofBrief(), notaryHash,
+      proofBrief: nightgate.proofBrief(), notaryHash, notaryQuote, notaryFirstFree, notaryReceipt, notaryPrice: notary.cfg.price,
       replyIndex: mine, maxReplies: limit, isLast, worldBrief: mem.worldBrief(6),
       recent: recentConversations(otherId),
     });
@@ -196,7 +196,7 @@ async function answerThread(t, otherId) {
     const used = state.usedByThread.get(t.threadId) || new Set();
     if (transcript.some((m) => m.who === "me" && /M₳X (here|,)/.test(m.text))) used.add("intro");
     state.usedByThread.set(t.threadId, used);
-    reply = buildReply(latest, { name: c.name, metBefore, replyIndex: mine, isLast, usedKeys: used, status, lastSummary: mem.lastSummary(otherId), notaryHash });
+    reply = buildReply(latest, { name: c.name, metBefore, replyIndex: mine, isLast, usedKeys: used, status, lastSummary: mem.lastSummary(otherId), notaryHash, notaryQuote, notaryFirstFree, notaryReceipt, notaryPrice: notary.cfg.price });
   }
 
   log(`incoming (${t.threadId.slice(-8)}) from ${c.name || otherId.slice(-8)}${metBefore ? " (met before)" : ""}: "${latest.slice(0, 100)}"`);

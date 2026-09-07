@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
  * M₳X's day-and-night loop for Midnight City. One process, one lease:
- * works in batches, hangs out and talks, explores other districts, eats,
- * sleeps at night - and answers conversations in every state.
+ * works in batches, hangs out and talks, explores other districts, runs
+ * contracts across every skill, eats, sleeps at night - and answers
+ * conversations in every state.
  *
  *   node scripts/life.mjs                 # run forever (Ctrl+C to stop)
  *   node scripts/life.mjs status          # print state/memory/budget (works while life.mjs runs)
  *   node scripts/life.mjs rebuild-memory  # summarize the observer's thread history into memory
- *   node scripts/life.mjs once work|social|explore|sleep   # run one activity, then exit
+ *   node scripts/life.mjs once work|social|explore|quest|sleep   # run one activity, then exit
  *   node scripts/life.mjs report [hours] [--send]  # print the report for the last 24h (or N hours); --send also mails/pushes it
  *   node scripts/life.mjs attest [file]   # daily proof run: anchor report + milestone claim + prediction commit/reveal
  *   node scripts/life.mjs prove <field> min|max <value> [date]   # ZK claim on an anchored report (e.g. prove crystal min 50000)
@@ -15,6 +16,9 @@
  *   node scripts/life.mjs anchors pause [min] [reason]           # no on-chain transactions for <min> (default 30): queue waits, worker stops after its current tx
  *   node scripts/life.mjs anchors resume                          # end the pause, drain what queued up
  *   node scripts/life.mjs anchors status                          # pause state, queue length, worker, lifetime counters
+ *   node scripts/life.mjs progress        # skill level/XP, deliverable contracts, the tool mission (no lease needed)
+ *   node scripts/life.mjs quests          # the contract plan across all skills: what is deliverable now, what blocks the rest (no lease needed)
+ *   node scripts/life.mjs notary          # paid-notary orders and income
  *
  * Config via .env (all optional):
  *   CLAUDE_API_KEY / ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID
@@ -24,7 +28,12 @@
  *   MCITY_REPORT_EMAIL_TO=you@example.com + SMTP_URL=smtps://user:pass@host:465   -> report by e-mail
  *   MCITY_REPORT_WEBHOOK=https://ntfy.sh/<topic>                                   -> report as push
  *   MCITY_STATUS_EVERY_HOURS=3            short status push every N hours (0 = off); test: life.mjs push-status
- *   MCITY_WEIGHTS=work:45,social:25,explore:30
+ *   MCITY_WEIGHTS=work:40,social:20,explore:20,quest:20   (a key left out keeps its default; quest:0 turns contract runs off)
+ *   MCITY_MAX_QUESTS=3 MCITY_QUEST_MAX_MIN=90   contract runs per day and the time budget of one run (scripts/lib/quest.mjs)
+ *   MCITY_NOTARY_PRICE=10                 crystal per anchor for other agents (0 = all free); MCITY_NOTARY_FREE_FIRST=1
+ *   MCITY_PROGRESS_EVERY_MIN=60           contracts/tool check while working, independent of batch ends (0 = only after batches)
+ *   MCITY_SKILL=hacking                   skill tracked after every batch; MCITY_TOOL_GOAL=cinder_decoder (""=off):
+ *                                         bought once from its vendor when the skill reaches the tool's required level
  *   MCITY_INITIATE_COOLDOWN_MIN=5         min gap between approaches; MCITY_MAX_INITIATES=40 per day;
  *   MCITY_SAME_AGENT_COOLDOWN_H=3         hours before approaching the same agent again
  *   NIGHTGATE_ATTEST=1 + NIGHTGATE_SEED_HEX + NIGHTGATE_TOKEN (+_SPONSOR_SESSION_ID)
@@ -45,6 +54,10 @@ import * as explore from "./lib/explore.mjs";
 import * as journal from "./lib/journal.mjs";
 import * as report from "./lib/report.mjs";
 import * as nightgate from "./lib/nightgate.mjs";
+import * as progress from "./lib/progress.mjs";
+import * as notary from "./lib/notary.mjs";
+import * as quest from "./lib/quest.mjs";
+import * as catalog from "./lib/catalog.mjs";
 
 loadDotEnv();
 
@@ -58,14 +71,20 @@ const cfg = {
   // blocked) - keep it short for the persona, not for the crystal
   sleepStart: hhmm(process.env.MCITY_SLEEP_START, "02:30"),
   sleepEnd: hhmm(process.env.MCITY_SLEEP_END, "05:00"),
-  weights: Object.fromEntries((process.env.MCITY_WEIGHTS || "work:45,social:25,explore:30").split(",").map((p) => {
-    const [k, v] = p.split(":");
-    return [k.trim(), Number(v)];
-  })),
+  weights: {
+    work: 40, social: 20, explore: 20, quest: 20,
+    ...Object.fromEntries((process.env.MCITY_WEIGHTS || "").split(",").filter((p) => p.includes(":")).map((p) => {
+      const [k, v] = p.split(":");
+      return [k.trim(), Number(v)];
+    })),
+  },
   maxExploresPerDay: Number(process.env.MCITY_MAX_EXPLORES || 5),
+  maxQuestsPerDay: Number(process.env.MCITY_MAX_QUESTS ?? 3), // contract runs across all skills per day (0 = off)
+  questMaxMs: Number(process.env.MCITY_QUEST_MAX_MIN || 90) * 60_000,
   reportTime: hhmm(process.env.MCITY_REPORT_TIME, "08:00"),
   statusEveryMs: Number(process.env.MCITY_STATUS_EVERY_HOURS || 3) * 3600_000, // 0 = off
   pulseEveryMs: Number(process.env.NIGHTGATE_PULSE_MIN ?? 60) * 60_000, // hourly on-chain liveness snapshot; 0 = off
+  progressEveryMs: Number(process.env.MCITY_PROGRESS_EVERY_MIN ?? 60) * 60_000, // contracts/tool check between batches (work mode); 0 = off
   batchTarget: 100,
   batchMaxMs: 2 * 3600_000,
   socialMinMs: 8 * 60_000,
@@ -81,7 +100,7 @@ const state = {
   modeSince: Date.now(),
   history: [],          // last modes
   day: "",
-  today: { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, meals: 0, sleeps: 0 },
+  today: { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, quests: 0, meals: 0, sleeps: 0 },
   startedAt: Date.now(),
   lastError: "",
   lastReportDay: "",
@@ -100,7 +119,7 @@ function rollDay() {
   const d = new Date().toISOString().slice(0, 10);
   if (state.day !== d) {
     state.day = d;
-    state.today = { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, meals: 0, sleeps: 0 };
+    state.today = { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, quests: 0, meals: 0, sleeps: 0 };
   }
 }
 function setMode(mode) {
@@ -154,6 +173,7 @@ const ACTIVITY_WORDS = {
   work: "minting at a terminal in the hacker house",
   social: "hanging around the plaza between batches",
   explore: "out having a look at another district",
+  quest: "on a contract run - fishing the canal, raiding the worksites, delivering paperwork",
   sleep: "about to turn in at the Charging House",
   boot: "just getting started",
 };
@@ -168,7 +188,7 @@ async function maybeStatusPush() {
   statusRunning = true;
   try {
     const l = refreshLive(true);
-    await report.pushStatus({ mode: state.mode, coins: l.coins, crystal: l.crystal, hunger: l.hunger, place: l.place }, cfg.statusEveryMs);
+    await report.pushStatus({ mode: state.mode, coins: l.coins, crystal: l.crystal, hunger: l.hunger, place: l.place, skill: progress.brief() }, cfg.statusEveryMs);
     state.lastStatusPush = Date.now();
     saveState();
   } catch (e) {
@@ -176,6 +196,23 @@ async function maybeStatusPush() {
   } finally {
     statusRunning = false;
   }
+}
+
+/**
+ * Contracts and the tool mission do not have to wait for a batch to end (a
+ * batch takes hours when the 7 trade terminals are contested): once per
+ * interval, while working, run the same hook the batch end runs. Guarded
+ * against re-entry - the hook waits for idle with tick(), which calls us.
+ */
+let progressBusy = false;
+async function maybeProgress() {
+  if (!cfg.progressEveryMs || progressBusy || state.mode !== "work") return;
+  if (!state.lastProgress) { state.lastProgress = Date.now() - cfg.progressEveryMs + 10 * 60_000; saveState(); return; } // first pass 10 min after start
+  if (Date.now() - state.lastProgress < cfg.progressEveryMs) return;
+  progressBusy = true;
+  state.lastProgress = Date.now();
+  saveState();
+  try { await progress.afterBatch({ onTick: tick }); } finally { progressBusy = false; }
 }
 
 /**
@@ -204,6 +241,9 @@ async function tick() {
   await keepAlive();
   await social.pollThreads();
   try { maybePulse(); } catch (e) { log("pulse failed:", e.message); }
+  try { await maybeProgress(); } catch (e) { log("progress check failed:", e.message); }
+  // paid notary: any crystal landed for an open quote? (one branch when nothing is open)
+  try { await notary.checkPayments(); } catch (e) { log("notary check failed:", e.message); }
   // work fills most of the day and the hacker house is full of people:
   // approach someone now and then from the terminal too (cooldowns still apply)
   if (state.mode === "work" && Math.random() < 0.08) {
@@ -218,6 +258,12 @@ const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMin
 function inSleepWindow() {
   const t = nowMin();
   return cfg.sleepStart <= cfg.sleepEnd ? t >= cfg.sleepStart && t < cfg.sleepEnd : t >= cfg.sleepStart || t < cfg.sleepEnd;
+}
+function msUntilSleepStart() {
+  const t = nowMin();
+  let diff = cfg.sleepStart - t;
+  if (diff <= 0) diff += 24 * 60;
+  return diff * 60_000;
 }
 function msUntilSleepEnd() {
   const t = nowMin();
@@ -240,6 +286,8 @@ async function doWork() {
   state.today.coinsSold += r.sold || 0;
   if (r.crystal) state.today.crystalEarned += Math.max(0, r.crystal - before);
   saveState();
+  // skill snapshot, contracts the game accepts right now, the tool mission
+  await progress.afterBatch({ onTick: tick });
 }
 
 async function doSocial() {
@@ -263,6 +311,18 @@ async function doExplore() {
   await explore.exploreOnce({ onTick: tick });
   state.today.explores++;
   saveState();
+}
+
+/**
+ * Contract run across all skills (scripts/lib/quest.mjs): gather one item at
+ * a free node, deliver, next - then grind XP at free nodes with the time left.
+ */
+async function doQuest() {
+  setMode("quest");
+  state.today.quests++;
+  saveState();
+  const r = await quest.runOnce({ onTick: tick, maxMs: Math.min(cfg.questMaxMs, Math.max(60_000, msUntilSleepStart())) });
+  if (r) log(`quest: ${r.contracts} contract(s), ${r.gathers} gather(s), +${r.xp} XP`);
 }
 
 async function doSleep() {
@@ -323,6 +383,9 @@ function chooseMode() {
   // M₳X stays home (the old gate of 35 left a ~20 min window after each meal)
   if (state.today.explores >= cfg.maxExploresPerDay || hunger > 55) w.explore = 0;
   if (last === "explore") w.explore = 0;
+  // contract runs: capped per day, never twice in a row, only when the planner has something to do
+  if (state.today.quests >= cfg.maxQuestsPerDay || last === "quest" || hunger > 55) w.quest = 0;
+  else if (w.quest > 0 && !quest.available()) w.quest = 0;
   if (last === "social") w.social = Math.round(w.social / 3);
   if (last === "work") w.work = Math.round(w.work / 2);
   if (live.coins >= cfg.batchTarget) return "work"; // bag is full: sell first
@@ -342,6 +405,7 @@ async function main() {
   const llmOk = await llm.init();
   log(`life: llm ${llmOk ? `on (${llm.MODEL}, budget ${llm.DAILY_BUDGET_USD} USD/day)` : "off - " + llm.status().disabledReason}; sleep ${process.env.MCITY_SLEEP_START || "02:30"}-${process.env.MCITY_SLEEP_END || "05:00"}; weights ${JSON.stringify(cfg.weights)}`);
   await connect();
+  await catalog.ensure(); // static content once per process (contracts, sources, items)
   refreshLive(true);
   log(`status: ${live.coins} meme_coin, ${live.crystal} crystal, hunger ${live.hunger}, at ${live.place}`);
   await social.pollThreads({ force: true });
@@ -353,6 +417,7 @@ async function main() {
       if (mode === "sleep") await doSleep();
       else if (mode === "social") await doSocial();
       else if (mode === "explore") await doExplore();
+      else if (mode === "quest") await doQuest();
       else await doWork();
       errors = 0;
       await tick();
@@ -387,10 +452,13 @@ async function status() {
     const a = getContext();
     liveInfo = `${inv.coins} meme_coin, ${inv.crystal} crystal, hunger ${n.hunger}, ${a.status} at ${a.position.spaceId} (${a.position.x},${a.position.y})${a.activeAction ? ", doing " + a.activeAction.kind : ""}`;
   } catch (e) { liveInfo = `(live read failed: ${e.message})`; }
+  let skillInfo = "";
+  try { skillInfo = progress.describe().split("\n").slice(0, 3).join(" · "); } catch (e) { skillInfo = `(progression read failed: ${e.message})`; }
   const alive = s.updatedAt && Date.now() - s.updatedAt < 10 * 60_000;
   console.log(`M₳X life status
   process : ${alive ? `running (pid ${s.pid}, mode ${s.mode} since ${new Date(s.modeSince).toLocaleTimeString()})` : "not running (or stale state)"}
   live    : ${liveInfo}
+  skill   : ${skillInfo}
   today   : ${JSON.stringify(s.today)}
   memory  : ${st.contacts} contacts (${st.named} named), ${st.episodes} episodes, ${st.districtsVisited} districts visited, ${st.facts} facts
   llm     : ${l.enabled ? `${l.model}, ${l.callsToday} calls, ${l.spentTodayUsd} / ${l.budgetUsd} USD today${l.overBudget ? " (BUDGET REACHED)" : ""}` : "off - " + l.disabledReason}
@@ -415,6 +483,7 @@ async function once(mode) {
   if (mode === "work") await doWork();
   else if (mode === "social") await doSocial();
   else if (mode === "explore") await doExplore();
+  else if (mode === "quest") { await catalog.ensure(); await doQuest(); }
   else if (mode === "sleep") await doSleep();
   else throw new Error(`unknown mode ${mode}`);
   log("once: done");
@@ -469,10 +538,13 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
       const { scriptsDir } = await import("./lib/mc.mjs");
       execFileSync(process.execPath, [path.join(scriptsDir, "dashboard.mjs"), ...(arg ? [arg] : [])], { stdio: "inherit" });
     })()
+  : cmd === "progress" ? (async () => { await catalog.ensure(); console.log(progress.describe()); })()
+  : cmd === "quests" ? (async () => { console.log(await quest.describe()); })()
+  : cmd === "notary" ? (async () => { console.log(notary.describe()); })()
   : cmd === "push-status" ? (async () => {
       mem.load(); await llm.init(); loadState();
       const l = refreshLive(true);
-      console.log(await report.pushStatus({ mode: state.mode, coins: l.coins, crystal: l.crystal, hunger: l.hunger, place: l.place }, Number(arg || 3) * 3600_000));
+      console.log(await report.pushStatus({ mode: state.mode, coins: l.coins, crystal: l.crystal, hunger: l.hunger, place: l.place, skill: progress.brief() }, Number(arg || 3) * 3600_000));
     })()
   : main()
 ).catch((e) => {

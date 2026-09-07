@@ -27,6 +27,7 @@ const KIND_LABEL = {
   explore: "exploration", notary: "notary", "prediction-commit": "prediction commit",
   "prediction-reveal": "prediction reveal", "grant-test": "system check",
   pulse: "hourly pulse", meal: "meal", sleep: "sleep", "report-diff": "zk claim: reports differ",
+  contract: "contract delivered", levelup: "level up", tool: "tool secured", quest: "contract run", craft: "crafted", "notary-paid": "notary (paid)",
 };
 const kindLabel = (k) => KIND_LABEL[k] || (k?.startsWith("predicate:") ? `zk claim: ${k.slice(10)}` : k || "attest");
 
@@ -48,7 +49,8 @@ function collect() {
     total: st.ok, todays: ok.filter((a) => a.date === today).length,
     failed: st.failed,
     feeWasted: st.feeWasted || 0,
-    notarized: st.byKind.notary || 0,
+    skipped: st.skipped || 0,
+    notarized: (st.byKind.notary || 0) + (st.byKind["notary-paid"] || 0),
     byKind,
     milestone: predicate ? { threshold: predicate.threshold, date: predicate.date } : null,
     score: ng.scoreboard(),
@@ -115,7 +117,7 @@ function stats() {
       <div class="hint">claims of other agents anchored, free of charge</div></div>
     <div class="stat"><div class="label">anchor mix</div>
       <div class="value">${fmtN(Object.keys(d.byKind).length)} <span class="dim-inline">kinds</span></div>
-      <div class="hint">${esc(Object.entries(d.byKind).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · "))}${d.failed ? ` · ${fmtN(d.failed)} failed${d.feeWasted ? ` (${fmtN(d.feeWasted)} refused on chain, fee burned)` : ""}` : ""}</div></div>
+      <div class="hint">${esc(Object.entries(d.byKind).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · "))}${d.failed ? ` · ${fmtN(d.failed)} failed${d.feeWasted ? ` (${fmtN(d.feeWasted)} refused on chain, fee burned)` : ""}${d.skipped ? ` (${fmtN(d.skipped)} skipped after a failed prerequisite)` : ""}` : ""}</div></div>
   </section>`;
 }
 
@@ -160,8 +162,8 @@ function timeline() {
       <td><span class="kind">${esc(kindLabel(a.kind))}</span>${a.vault && a.vault !== d.vault ? ` <span class="sub2" title="anchored on an earlier vault ${esc(a.vault)}">vault ${esc(ng.shortHash(a.vault).slice(0, 8))}</span>` : ""}</td>
       <td class="mono hash" data-full="${esc(hash)}" title="click to copy the full hash">${esc(ng.shortHash(hash))}</td>
       <td>${a.ok
-        ? `<span class="chip anchored">${a.verified ? "verified" : "anchored"}</span>${a.rebuilt ? ` <span class="sub2" title="first attempt refused on chain, rebuilt against fresh state">rebuilt</span>` : ""}${a.batchOf ? ` <span class="sub2">batch of ${a.batchOf}</span>` : ""}`
-        : `<span class="chip failed" title="${esc(a.error || "")}">${a.feeWasted ? "refused on chain, fee burned" : "failed"}</span>`}</td>
+        ? `<span class="chip anchored">${a.verified ? "verified" : "anchored"}</span>${a.rebuilt ? ` <span class="sub2" title="first attempt refused on chain, rebuilt against fresh state">rebuilt</span>` : ""}${a.lateLanded ? ` <span class="sub2" title="the sponsor's submit watch timed out; the worker kept probing the indexer until the tx showed up">landed late</span>` : ""}${a.batchOf ? ` <span class="sub2">batch of ${a.batchOf}</span>` : ""}`
+        : `<span class="chip failed" title="${esc(a.error || "")}">${a.feeWasted ? "refused on chain, fee burned" : a.skipped ? "skipped, prerequisite failed" : "failed"}</span>`}</td>
       <td class="mono sub2">${a.txExplorerHash
         ? `<a href="https://${esc(d.network)}.midnightexplorer.com/transactions/0x${esc(a.txExplorerHash)}" target="_blank" rel="noopener" title="${esc(a.txExplorerHash)}">${esc(ng.shortHash(a.txExplorerHash))}</a>`
         : a.txHash ? esc(ng.shortHash(a.txHash)) : "&mdash;"}</td>

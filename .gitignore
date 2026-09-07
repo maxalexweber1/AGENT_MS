@@ -20,3 +20,6 @@ scripts/run-forever.cmd
 
 node_modules/
 docs/bug-*.md
+deploy.local.sh
+weights.local.sh
+restart.local.sh

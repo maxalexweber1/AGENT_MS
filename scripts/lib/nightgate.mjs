@@ -86,6 +86,9 @@ export function config(env = process.env) {
     timeoutMs: Number(env.NIGHTGATE_TIMEOUT_MS || 30_000),
     maxAnchorsPerDay: Number(env.NIGHTGATE_MAX_ANCHORS_PER_DAY || 60),
     visibilityWaitMs: Number(env.NIGHTGATE_VISIBILITY_WAIT_MS ?? 120_000),
+    // a sponsor "submit watch timed out" is not a verdict: keep probing the
+    // indexer this long for a late landing before writing the item off
+    lateLandWaitMs: Number(env.NIGHTGATE_LATE_LAND_WAIT_MS ?? 180_000),
     batchMax: Math.max(1, Math.min(8, Number(env.NIGHTGATE_BATCH_MAX || 1))),
   };
 }
@@ -405,6 +408,8 @@ function applyStat(st, a) {
     st.failed += 1;
     // landed in a block but the call was refused: the sponsor paid for nothing
     if (a.feeWasted) st.feeWasted = (st.feeWasted || 0) + 1;
+    // never built: its prerequisite (attest / content root) failed in the same run
+    if (a.skipped) st.skipped = (st.skipped || 0) + 1;
   }
   if (a.at) {
     st.firstAt = st.firstAt == null ? a.at : Math.min(st.firstAt, a.at);
@@ -507,7 +512,8 @@ export function proofFacts() {
     commitPending: !!(commit && commit.date === day),
     reveal: reveal ? { date: reveal.date, predictedCoins: reveal.doc?.predictedCoins } : null,
     score: scoreboard(),
-    notarizedToday: h.filter((a) => a.kind === "notary" && a.date === day).length,
+    notarizedToday: h.filter((a) => (a.kind === "notary" || a.kind === "notary-paid") && a.date === day).length,
+    paidNotary: h.filter((a) => a.kind === "notary-paid").length,
   };
 }
 
@@ -524,7 +530,7 @@ export function proofBrief() {
   if (p.commitPending) lines.push(`This morning's prediction of today's coin count is COMMITTED on chain but still hidden - it gets revealed tomorrow morning. Do not state the number, it is secret until the reveal.`);
   if (p.reveal) lines.push(`Yesterday's revealed prediction (${p.reveal.date}): ${p.reveal.predictedCoins} coins, committed before the day started.`);
   if (p.score) lines.push(`Prediction track record: ${p.score.evaluated} evaluated, ${p.score.within10} within 10%, ${p.score.within25} within 25%, avg error ${p.score.avgErrorPct}%${p.score.last ? ` (last: predicted ${p.score.last.predicted}, actual ${p.score.last.actual})` : ""} - every one committed on chain BEFORE the day.`);
-  lines.push(`Notary claims you anchored for other agents today: ${p.notarizedToday}.`);
+  lines.push(`Notary claims you anchored for other agents today: ${p.notarizedToday}${p.paidNotary ? ` (${p.paidNotary} paid anchors so far in total)` : ""}. First anchor per agent is free, further ones cost crystal (send-crystal).`);
   return lines.join("\n");
 }
 
