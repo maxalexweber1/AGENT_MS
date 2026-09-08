@@ -21,6 +21,13 @@
  * only trip the builder's pre-check with "no content root"); `life.mjs attest`
  * re-queues the whole set once the chain is healthy again.
  *
+ * NIGHTGATE itself being down (5xx, "aborted due to timeout", connection
+ * errors, a job stuck in queued/running) is not the item's fault: the item
+ * stays at the head of the queue and is retried with backoff (1 min .. 30 min,
+ * NIGHTGATE_OUTAGE_RETRIES times, ~2 h). Only then is it written off - with its
+ * doc and metadataHash, so `life.mjs anchors retry` can re-anchor it later
+ * (2026-09-08: an outage cost eight anchors and the daily report set).
+ *
  * NIGHTGATE_BATCH_MAX > 1 bundles consecutive plain attests on one vault into
  * ONE transaction (one fee; a batch cannot collide with itself). A batch the
  * builder refuses up front (causality pre-check, nothing spent) falls back to
@@ -55,6 +62,19 @@ async function sponsorWithRetry(unboundTxB64, key) {
 }
 
 const ATTEST_CALLS = new Set(["attest", "anchorContentRoot", "attestReveal"]);
+const FINAL = new Set(["succeeded", "failed"]);
+// wait before retry n (1-based) when NIGHTGATE is unreachable; the last value repeats
+const OUTAGE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000, 900_000, 1_800_000];
+
+/** Sleep while keeping the lock fresh; returns early when a pause is requested. */
+async function idle(ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (ng.pausedUntil()) return;
+    await new Promise((r) => setTimeout(r, Math.min(30_000, until - Date.now())));
+    ng.touchLock();
+  }
+}
 // calls that leave a payload attestation the indexer can be asked about
 const PAYLOAD_CALLS = new Set(["attest", "attestReveal"]);
 // calls that only make sense once the payload (and its content root) is on chain
@@ -130,7 +150,11 @@ function baseEntry(item) {
     call: item.call,
     date: today(),
     ...(item.params.payloadHash ? { payloadHash: item.params.payloadHash } : {}),
+    // kept on failed entries too: together with the doc it is all a re-anchor needs
+    ...(item.params.metadataHash ? { metadataHash: item.params.metadataHash } : {}),
     ...(item.params.commitment ? { commitment: item.params.commitment } : {}),
+    // this item replaces an earlier failed entry (life.mjs anchors retry)
+    ...(item.meta?.reanchorOf ? { reanchorOf: item.meta.reanchorOf } : {}),
     ...(item.call === "proveFieldPredicate" ? { field: item.meta?.field, threshold: item.params.threshold, op: item.params.op } : {}),
     ...(item.doc ? { doc: item.doc } : {}),
     network: cfg.network,
@@ -219,6 +243,15 @@ async function submitWithRebuild(items, build, idKey) {
     const { unboundTxB64, attesterId } = await build();
     const sub = await sponsorWithRetry(unboundTxB64, `${idKey}-${attempt}`);
     let job = await ng.waitForJob(sub.jobId, sub.sessionId, { cfg });
+    if (!FINAL.has(job.status)) {
+      // a job stuck in queued/running is the API being slow or down, not a
+      // verdict (2026-09-08 06:05: the daily report was written off as
+      // "running" and its whole claim set skipped): give it the late-landing
+      // window, then treat it as an outage the caller retries
+      log(`${items[0].id} ${items[0].kind}: job ${sub.jobId} still ${job.status} after 180s - waiting up to ${Math.round(cfg.lateLandWaitMs / 1000)}s more`);
+      job = await ng.waitForJob(sub.jobId, sub.sessionId, { cfg, timeoutMs: cfg.lateLandWaitMs });
+      if (!FINAL.has(job.status)) throw new Error(`NIGHTGATE job ${sub.jobId} still ${job.status} after ${Math.round((180_000 + cfg.lateLandWaitMs) / 1000)}s (API slow or down)`);
+    }
     if (isSubmitTimeout(job)) job = await awaitLateLanding(items[0], job);
     outcome = { job, attesterId, attempt };
     if (job.status === "succeeded") { noteLanded(job, items.at(-1), true); break; }
@@ -315,6 +348,11 @@ export async function drain() {
   ng.takeLock();
   try { os.setPriority(19); } catch { /* not critical */ }
   seedLastLanded();
+  // keep the lock fresh WHILE proving too: a single proveFieldsDiffer took
+  // >11 min on 2026-09-08 and the lock (touched only between items) looked
+  // stale, inviting a second worker onto the same vault
+  const heartbeat = setInterval(() => { try { ng.touchLock(); } catch { /* ignore */ } }, 60_000);
+  heartbeat.unref();
   try {
     let n = 0;
     for (; ;) {
@@ -348,19 +386,26 @@ export async function drain() {
         }
       } catch (e) {
         const item = group[0];
-        // a NIGHTGATE/API outage (5xx, unreachable) is not the item's fault: put it
-        // back ONCE and give the API a minute (2026-09-07: two anchors lost to a 502)
-        if (!item.retried && /HTTP 5\d\d|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(e.message)) {
-          log(`${item.id} ${item.kind}: API trouble (${e.message.slice(0, 80)}) - retrying once in 60s`);
-          ng.writeQueue([...ng.readQueue().filter((q) => q.id !== item.id), { ...item, retried: true, at: Date.now() }]);
+        const outage = ng.isApiOutage(e.message);
+        // a NIGHTGATE/API outage (5xx, timeouts, unreachable) is not the item's
+        // fault: keep it at the head of the queue (order matters - a content
+        // root must follow its attest) and back off, 1 min .. 30 min, up to
+        // cfg.outageRetries times (2026-09-07: two anchors lost to a 502;
+        // 2026-09-08: eight lost to "aborted due to timeout" with no retry at all)
+        const retries = item.retries || 0;
+        if (outage && retries < cfg.outageRetries) {
+          const waitMs = OUTAGE_BACKOFF_MS[Math.min(retries, OUTAGE_BACKOFF_MS.length - 1)];
+          log(`${item.id} ${item.kind}: NIGHTGATE unreachable (${e.message.slice(0, 80)}) - retry ${retries + 1}/${cfg.outageRetries} in ${Math.round(waitMs / 1000)}s`);
+          ng.writeQueue(ng.readQueue().map((q) => (q.id === item.id ? { ...q, retries: retries + 1, retried: true, lastError: e.message.slice(0, 120) } : q)));
           ng.touchLock();
-          await new Promise((r) => setTimeout(r, 60_000));
+          await idle(waitMs);
           continue;
         }
         noteFailed(item);
-        log(`${item.id} ${item.kind}: error - ${e.message}`);
-        ng.record({ ok: false, kind: item.kind, call: item.call, error: e.message.slice(0, 300), ...(item.params?.payloadHash ? { payloadHash: item.params.payloadHash } : {}) });
-        try { journal.note("attest", { kind: item.kind, call: item.call, ok: false, error: e.message.slice(0, 200) }); } catch { /* ignore */ }
+        log(`${item.id} ${item.kind}: error${outage ? ` after ${retries} outage retries` : ""} - ${e.message}`);
+        // doc + metadataHash stay on the entry: `life.mjs anchors retry` re-anchors it from here
+        ng.record({ ok: false, ...baseEntry(item), status: "failed", error: e.message.slice(0, 300), ...(outage ? { apiOutage: true, retries } : {}) });
+        try { journal.note("attest", { kind: item.kind, call: item.call, ok: false, payloadHash: item.params?.payloadHash, network: cfg.network, error: e.message.slice(0, 200), ...(outage ? { apiOutage: true } : {}) }); } catch { /* ignore */ }
         done = [item];
       }
       // remove the processed items (whatever arrived meanwhile stays)
@@ -382,6 +427,7 @@ export async function drain() {
       } catch (e) { log("dashboard refresh failed:", e.message); }
     }
   } finally {
+    clearInterval(heartbeat);
     ng.releaseLock();
     await ng.closeBuilder();
   }

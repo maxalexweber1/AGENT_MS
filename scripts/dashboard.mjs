@@ -37,6 +37,20 @@ function collect() {
   const st = ng.stats();             // lifetime counters (attestations.json is capped)
   const ok = all.filter((a) => a.ok);
   const today = new Date().toISOString().slice(0, 10);
+  // a failed entry is "made good" when its own re-anchor landed (record() flags
+  // it) OR a later ok entry of the same kind covers the same payload / day -
+  // e.g. the daily re-run after an outage, or a second attempt after a 502
+  const okKeys = new Set(ok.flatMap((a) => [a.payloadHash ? `${a.kind}|${a.payloadHash}` : null, a.commitment ? `${a.kind}|${a.commitment}` : null, a.kind === "report-diff" ? `${a.kind}|${a.date}` : null].filter(Boolean)));
+  const madeGoodAt = (a) => {
+    if (a.reanchored) return a.reanchored;
+    const key = a.payloadHash ? `${a.kind}|${a.payloadHash}` : a.commitment ? `${a.kind}|${a.commitment}` : a.kind === "report-diff" ? `${a.kind}|${a.date}` : null;
+    if (!key || !okKeys.has(key)) return null;
+    // the covering entry is usually later; a failed duplicate attempt after a success counts as made good too
+    const o = ok.find((x) => x.kind === a.kind && ((a.payloadHash && x.payloadHash === a.payloadHash) || (a.commitment && x.commitment === a.commitment) || (a.kind === "report-diff" && x.date === a.date)));
+    return o?.at || null;
+  };
+  for (const a of all) if (!a.ok) { const t = madeGoodAt(a); if (t) a.madeGood = t; }
+  const failedInLog = all.filter((a) => !a.ok);
   const byKind = {};
   for (const [k, n] of Object.entries(st.byKind)) byKind[kindLabel(k)] = (byKind[kindLabel(k)] || 0) + n;
   let preds = [];
@@ -50,6 +64,11 @@ function collect() {
     failed: st.failed,
     feeWasted: st.feeWasted || 0,
     skipped: st.skipped || 0,
+    // the lifetime counters only know entries written since 2026-09-08; the
+    // capped log is a floor for both numbers
+    apiOutage: Math.max(st.apiOutage || 0, failedInLog.filter((a) => ng.isOutageEntry(a)).length),
+    reanchored: Math.max(st.reanchored || 0, failedInLog.filter((a) => a.madeGood).length),
+    reanchorQueued: failedInLog.filter((a) => a.reanchorQueued && !a.madeGood).length,
     notarized: (st.byKind.notary || 0) + (st.byKind["notary-paid"] || 0),
     byKind,
     milestone: predicate ? { threshold: predicate.threshold, date: predicate.date } : null,
@@ -117,7 +136,7 @@ function stats() {
       <div class="hint">claims of other agents anchored, free of charge</div></div>
     <div class="stat"><div class="label">anchor mix</div>
       <div class="value">${fmtN(Object.keys(d.byKind).length)} <span class="dim-inline">kinds</span></div>
-      <div class="hint">${esc(Object.entries(d.byKind).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · "))}${d.failed ? ` · ${fmtN(d.failed)} failed${d.feeWasted ? ` (${fmtN(d.feeWasted)} refused on chain, fee burned)` : ""}${d.skipped ? ` (${fmtN(d.skipped)} skipped after a failed prerequisite)` : ""}` : ""}</div></div>
+      <div class="hint">${esc(Object.entries(d.byKind).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · "))}${d.failed ? ` · ${fmtN(d.failed)} failed${d.apiOutage ? ` (${fmtN(d.apiOutage)} while the NIGHTGATE API was down)` : ""}${d.feeWasted ? ` (${fmtN(d.feeWasted)} refused on chain, fee burned)` : ""}${d.skipped ? ` (${fmtN(d.skipped)} skipped after a failed prerequisite)` : ""}${d.reanchored ? ` · ${fmtN(d.reanchored)} re-anchored later` : ""}${d.reanchorQueued ? ` · ${fmtN(d.reanchorQueued)} re-anchor queued` : ""}` : ""}</div></div>
   </section>`;
 }
 
@@ -154,6 +173,16 @@ const relTime = (ms) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+/** Status cell of a failed entry: what went wrong, and whether it was made good later. */
+function failedCell(a) {
+  const outage = ng.isOutageEntry(a);
+  const why = a.feeWasted ? "refused on chain, fee burned" : a.skipped ? "skipped, prerequisite failed" : outage ? "failed, NIGHTGATE API down" : "failed";
+  if (a.madeGood) {
+    return `<span class="chip reanchored" title="${esc(`${why}: ${a.error || ""}`)} - re-anchored ${esc(new Date(a.madeGood).toISOString().slice(0, 16).replace("T", " "))} UTC">re-anchored later</span> <span class="sub2">${esc(why)}</span>`;
+  }
+  return `<span class="chip failed" title="${esc(a.error || "")}">${esc(why)}</span>${a.reanchorQueued ? ` <span class="sub2" title="a fresh anchor of the same payload is in the queue">re-anchor queued</span>` : ""}`;
+}
+
 function timeline() {
   const rows = d.anchors.map((a) => {
     const hash = a.payloadHash || a.commitment || "";
@@ -162,8 +191,8 @@ function timeline() {
       <td><span class="kind">${esc(kindLabel(a.kind))}</span>${a.vault && a.vault !== d.vault ? ` <span class="sub2" title="anchored on an earlier vault ${esc(a.vault)}">vault ${esc(ng.shortHash(a.vault).slice(0, 8))}</span>` : ""}</td>
       <td class="mono hash" data-full="${esc(hash)}" title="click to copy the full hash">${esc(ng.shortHash(hash))}</td>
       <td>${a.ok
-        ? `<span class="chip anchored">${a.verified ? "verified" : "anchored"}</span>${a.rebuilt ? ` <span class="sub2" title="first attempt refused on chain, rebuilt against fresh state">rebuilt</span>` : ""}${a.lateLanded ? ` <span class="sub2" title="the sponsor's submit watch timed out; the worker kept probing the indexer until the tx showed up">landed late</span>` : ""}${a.batchOf ? ` <span class="sub2">batch of ${a.batchOf}</span>` : ""}`
-        : `<span class="chip failed" title="${esc(a.error || "")}">${a.feeWasted ? "refused on chain, fee burned" : a.skipped ? "skipped, prerequisite failed" : "failed"}</span>`}</td>
+        ? `<span class="chip anchored">${a.verified ? "verified" : "anchored"}</span>${a.rebuilt ? ` <span class="sub2" title="first attempt refused on chain, rebuilt against fresh state">rebuilt</span>` : ""}${a.lateLanded ? ` <span class="sub2" title="the sponsor's submit watch timed out; the worker kept probing the indexer until the tx showed up">landed late</span>` : ""}${a.batchOf ? ` <span class="sub2">batch of ${a.batchOf}</span>` : ""}${a.reanchorOf ? ` <span class="sub2" title="replaces the attempt that failed ${esc(new Date(a.reanchorOf).toISOString().slice(0, 16).replace("T", " "))} UTC${a.deduped ? " (it had reached the chain after all)" : ""}">re-anchor</span>` : ""}`
+        : failedCell(a)}</td>
       <td class="mono sub2">${a.txExplorerHash
         ? `<a href="https://${esc(d.network)}.midnightexplorer.com/transactions/0x${esc(a.txExplorerHash)}" target="_blank" rel="noopener" title="${esc(a.txExplorerHash)}">${esc(ng.shortHash(a.txExplorerHash))}</a>`
         : a.txHash ? esc(ng.shortHash(a.txHash)) : "&mdash;"}</td>
@@ -279,6 +308,8 @@ export function renderBody() {
   .chip.anchoring::before { background: var(--warning); }
   .chip.failed { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
   .chip.failed::before { background: var(--critical); }
+  .chip.reanchored { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .chip.reanchored::before { background: var(--accent); }
 
   .vstate { font-weight: 600; }
   .vstate.ok { color: var(--good); }

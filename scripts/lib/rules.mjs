@@ -85,15 +85,21 @@ export function facts(st = {}) {
     ? (st.coins > 0 ? `${st.coins} meme coin${st.coins === 1 ? "" : "s"} in the bag right now` : "bag's empty right now, just cashed out")
     : "coins moving through the bag";
   const fed = st.hunger == null ? "fed" : st.hunger < 40 ? "fed" : st.hunger < 70 ? "getting hungry" : "running on fumes";
+  // dynamic vendor pricing since 2026-09-07: 6..20 crystal a coin, climbing ~1 per 10 s after every sale
+  const p = st.coinPrice;
+  const range = st.coinPriceLo != null && st.coinPriceHi != null && st.coinPriceLo !== st.coinPriceHi ? `${st.coinPriceLo} and ${st.coinPriceHi}` : "6 and 20";
+  const priceLine = p != null
+    ? `the Central Crypto Merchant pays ${p} crystal a meme coin this minute — it swings between ${range}, every sale knocks it down and it climbs back about one crystal every ten seconds`
+    : `the Central Crypto Merchant pays between ${range} crystal a meme coin depending on the minute — every sale knocks the price down, then it climbs back`;
   return {
-    loop: "mint meme coins at the hacker house terminals, sell them at the Central Crypto Merchant for 10 crystal apiece, eat, repeat",
+    loop: "mint meme coins at the hacker house terminals, sell them at the Central Crypto Merchant on the upswing, eat, repeat",
     bag,
     fed,
     crystal: ok ? `${Number(st.crystal).toLocaleString("en-US")} crystal banked` : "a healthy pile of crystal banked",
     terminals: "56 terminals in the hacker house, most of them reserved at any moment — half my attempts bounce, I just retry every 30 seconds. Crowded, not stalled",
     weight: "carry more than 100 coins and you're overburdened, work speed drops to a third — batches of 100, then sell",
-    priceLine: "10 crystal per meme coin at the Central Crypto Merchant",
-    prices: "10 crystal per meme coin at the Central Crypto Merchant, 3 per ore, 1 per log. Food is 50 a meal",
+    priceLine,
+    prices: `${cap(priceLine)}. Ore 6, logs 2. Food is 50 a meal`,
     mining: "the mines pay about a third of that but are never crowded",
     nothingToBuy: "nothing in Central costs more than 25 crystal, so past a few thousand the number is just a number",
   };
@@ -124,11 +130,11 @@ function answers(F, topic = "") {
     falsifier: {
       full: P?.report
         ? `One verified thing: ${F.priceLine}. Falsifier: sell a single coin and read the ledger. Better one: my whole day is anchored on Midnight — sha256 ${shortHash(P.report.payloadHash)} on the AttestationVault. If the hash doesn't verify, I'm lying.`
-        : `One verified thing: ${F.priceLine}. Falsifier: sell a single coin and read the ledger — if it isn't +10, I'm wrong. Second: ${F.weight}. Falsifier: load 150 coins and time a run.`,
+        : `One verified thing: ${F.priceLine}. Falsifier: sell a single coin and read the ledger — if it doesn't match the listed price, I'm wrong. Second: ${F.weight}. Falsifier: load 150 coins and time a run.`,
       short: `If you want it verifiable: ${F.priceLine}, sell one and check the ledger.`,
     },
     room_terminal: {
-      full: "That terminal in your room is the same crypto rig as the ones at the hacker house: interact with it and it mints meme coins, slower than you'd like. Sell them at the Central Crypto Merchant, 10 crystal each.",
+      full: "That terminal in your room is the same crypto rig as the ones at the hacker house: interact with it and it mints meme coins, slower than you'd like. Sell them at the Central Crypto Merchant — the price swings 6 to 20 a coin now, so sell on the upswing.",
       short: "And yes, the room terminal is a normal crypto rig — it mints meme coins.",
     },
     terminals: {
@@ -155,8 +161,8 @@ function answers(F, topic = "") {
       short: "Data I track: free terminals, mint rate, merchant price. Nothing else pays.",
     },
     ore: {
-      full: "Ore at 3 is the right number, but I tested the mines with an obsidian pickaxe: 9 ore in 23 swings, 27 crystal. Same time at a terminal is about three times that in meme coins. Mining only wins when every terminal is taken.",
-      short: "Ore at 3 and logs at 1 are fine if you can't get a terminal; a meme coin pays 10 and mints faster.",
+      full: "Ore pays 6 now, but I tested the mines with an obsidian pickaxe: 9 ore in 23 swings. Same time at a terminal is still a multiple of that in meme coins if you sell on the upswing. Mining only wins when every terminal is taken.",
+      short: "Ore at 6 and logs at 2 are fine if you can't get a terminal; a meme coin pays 6 to 20 and mints faster.",
     },
     market: {
       full: pick([
@@ -183,7 +189,7 @@ function answers(F, topic = "") {
     faction: {
       full: pick([
         `Haven't seen corporate bloat, only crowding: ${F.terminals}. I keep it simple: mint, sell, eat.`,
-        "The city doesn't respect labor, it pays for it: 10 crystal a coin, no more, no less. I can live with an honest number.",
+        "The city doesn't respect labor, it pays for it: a coin fetches whatever the merchant's mood says, 6 to 20, and I sell on the upswing. I can live with a number I can read off the board.",
       ]),
       short: "No bloat in my circuit, just crowding.",
     },
@@ -309,7 +315,7 @@ export function buildOpener(ctx = {}) {
   }
   if (prof === "hacker" && Math.random() < 0.5) return nightgateOpener(name);
   if (prof === "miner") return `${hi} — M₳X, hacker from the terminal circuit. How's the ore paying these days? The Central Merchant East still at 3 a piece?`;
-  if (prof === "lumberjack") return `${hi} — M₳X, hacker. Logs still 1 crystal at the west merchant? Feels like the worst rate in town, no offense.`;
+  if (prof === "lumberjack") return `${hi} — M₳X, hacker. Logs at 2 crystal at the west merchant now? Still feels like the thinnest rate in town, no offense.`;
   if (ctx.placeNote) return `${hi} — M₳X, hacker from Central. First time out here. ${ctx.placeNote} What brings you to this corner?`;
   return pick([
     `${hi} — M₳X, hacker. You a terminal regular too, or just passing through the plaza?`,
@@ -324,7 +330,7 @@ export function buildShout(ctx = {}) {
   const F = facts(ctx.status || {});
   const P = proofFacts();
   const options = [
-    "PSA from M₳X: Central Crypto Merchant still pays 10 a meme coin. Batches of 100, then sell — over 100 you crawl.",
+    `PSA from M₳X: the Central Crypto Merchant's coin price swings now — ${F.priceLine.replace(/^the Central Crypto Merchant pays /, "")}. Sell on the upswing, batches of 100 — over 100 you crawl.`,
     `Terminals report: ${F.terminals.split(" — ")[0]}. Be patient, retry, don't spam.`,
     "Anyone seen a merchant that buys anything for more than 25 crystal? Asking for a stack that has nothing to do.",
     projectShout(),

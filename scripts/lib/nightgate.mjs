@@ -90,7 +90,31 @@ export function config(env = process.env) {
     // indexer this long for a late landing before writing the item off
     lateLandWaitMs: Number(env.NIGHTGATE_LATE_LAND_WAIT_MS ?? 180_000),
     batchMax: Math.max(1, Math.min(8, Number(env.NIGHTGATE_BATCH_MAX || 1))),
+    // NIGHTGATE unreachable (5xx, timeouts, connection errors): how often the
+    // worker retries ONE item before writing it off (backoff 1 min .. 30 min,
+    // ~2 h in total). Written-off items keep their doc + metadataHash so
+    // `life.mjs anchors retry` can re-anchor them later.
+    outageRetries: Math.max(0, Number(env.NIGHTGATE_OUTAGE_RETRIES ?? 8)),
   };
+}
+
+/**
+ * Does this error message describe NIGHTGATE (or the network) being down or
+ * too slow - as opposed to the vault refusing the call? Outage failures are
+ * not the item's fault: the worker retries them, `anchors retry` re-anchors
+ * them and the dashboard labels them as such.
+ */
+export function isApiOutage(message) {
+  return /HTTP 5\d\d|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|TimeoutError|AbortError|Internal Server Error|Bad Gateway|Gateway Time-?out|Service Unavailable|API slow or down/i
+    .test(String(message || ""));
+}
+
+/** A failed log entry that NIGHTGATE being down (not the vault) explains - incl. jobs written off while still queued/running. */
+export function isOutageEntry(a) {
+  if (!a || a.ok) return false;
+  if (a.apiOutage) return true;
+  if (a.feeWasted || a.skipped) return false;
+  return isApiOutage(a.error) || /^(queued|running|pending|submitted)$/i.test(a.status || "");
 }
 
 // ---------- minimal OData client (agent-grant auth) ----------
@@ -380,15 +404,30 @@ export function history() {
   try { return JSON.parse(fs.readFileSync(attestFile, "utf8")); } catch { return []; }
 }
 
+function writeHistory(all) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(attestFile, JSON.stringify(all.slice(-500), null, 2));
+}
+
 export function record(entry) {
-  const all = history();
+  let all = history();
   const full = { at: Date.now(), ...entry };
   all.push(full);
-  try {
-    fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(attestFile, JSON.stringify(all.slice(-500), null, 2));
-  } catch (e) { log("attestation log write failed:", e.message); }
+  // a successful re-anchor closes the failed entry it replaces (dashboard: "re-anchored later")
+  if (full.ok && full.reanchorOf) {
+    all = all.map((a) => (!a.ok && a.at === full.reanchorOf ? { ...a, reanchored: full.at } : a));
+  }
+  try { writeHistory(all); } catch (e) { log("attestation log write failed:", e.message); }
   bumpStats(full);
+}
+
+/** Rewrite entries in place (e.g. flag the ones a re-anchor was queued for). Returns how many changed. */
+export function updateHistory(fn) {
+  const all = history();
+  let changed = 0;
+  const next = all.map((a) => { const b = fn(a); if (b && b !== a) changed += 1; return b || a; });
+  if (changed) { try { writeHistory(next); } catch (e) { log("attestation log write failed:", e.message); } }
+  return changed;
 }
 
 // ---------- lifetime counters (data/anchor-stats.json) ----------
@@ -404,12 +443,16 @@ function applyStat(st, a) {
     st.ok += 1;
     const k = a.kind || "attest";
     st.byKind[k] = (st.byKind[k] || 0) + 1;
+    // replaces an earlier failed entry (life.mjs anchors retry)
+    if (a.reanchorOf) st.reanchored = (st.reanchored || 0) + 1;
   } else {
     st.failed += 1;
     // landed in a block but the call was refused: the sponsor paid for nothing
     if (a.feeWasted) st.feeWasted = (st.feeWasted || 0) + 1;
     // never built: its prerequisite (attest / content root) failed in the same run
     if (a.skipped) st.skipped = (st.skipped || 0) + 1;
+    // NIGHTGATE / network down, not the vault refusing the call
+    if (isOutageEntry(a)) st.apiOutage = (st.apiOutage || 0) + 1;
   }
   if (a.at) {
     st.firstAt = st.firstAt == null ? a.at : Math.min(st.firstAt, a.at);

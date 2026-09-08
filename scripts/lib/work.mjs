@@ -16,6 +16,34 @@ const BUSY_GIVE_UP_MS = 20 * 60_000;
 const ERROR_RETRY_MS = 20_000;
 export const EAT_AT_HUNGER = 60;
 const FOOD_PRIORITY = ["fish", "meat", "to_go_food", "matcha_smoothie"];
+// Dynamic vendor pricing (city release 2026-09-07): the Central Crypto Merchant
+// pays 6..20 crystal per meme coin. Every sale knocks the price down, then it
+// climbs back about one crystal per 10 s to the 20 cap (measured 2026-09-08:
+// a full recovery takes ~2 min). A 100-coin batch is paid at the listed price,
+// so selling on the upswing is worth up to 3x - wait for >= SELL_MIN_PRICE,
+// at most SELL_WAIT_MAX_MS, then sell at whatever it is.
+const SELL_MIN_PRICE = Number(process.env.MCITY_SELL_MIN_PRICE ?? 17);
+const SELL_WAIT_MAX_MS = Number(process.env.MCITY_SELL_WAIT_MAX_S ?? 240) * 1000;
+const SELL_POLL_MS = 10_000;
+
+const price = { pays: null, merchantName: null, at: 0, lo: null, hi: null };
+
+/** Current meme-coin price at the crypto merchant (cached `maxAgeMs`); tracks the range seen this process. */
+export function coinPrice(maxAgeMs = 20_000) {
+  if (Date.now() - price.at < maxAgeMs) return price;
+  try {
+    const m = run("merchants");
+    const merchant = (m.merchants || []).find((x) => x.trade?.itemId === COIN && x.trade?.merchantName);
+    if (!merchant) return price;
+    const pays = Number(merchant.offer?.paysQuantity);
+    Object.assign(price, {
+      pays: Number.isFinite(pays) ? pays : null, merchantName: merchant.trade.merchantName, at: Date.now(),
+      lo: Number.isFinite(pays) ? Math.min(price.lo ?? pays, pays) : price.lo,
+      hi: Number.isFinite(pays) ? Math.max(price.hi ?? pays, pays) : price.hi,
+    });
+  } catch (e) { log("coin price read failed:", e.message); }
+  return price;
+}
 
 export async function goTo(areaId, label = areaId, onTick = null) {
   let a = await waitIdle("before-move", { onTick });
@@ -154,8 +182,19 @@ export async function sellAll(onTick) {
   if (!offer) { log(`no merchant currently buys ${COIN}`); return { sold: 0 }; }
   const qty = coins - (coins % offer.batch);
   if (qty < offer.min) return { sold: 0 };
-  log(`selling ${qty} ${COIN} to "${offer.merchantName}" (${crystal} crystal before)`);
   await waitIdle("before-sell", { onTick });
+  // sell on the upswing: the listed price is what the whole batch gets
+  let pays = offer.pays;
+  const t0 = Date.now();
+  while (pays != null && pays < SELL_MIN_PRICE && Date.now() - t0 < SELL_WAIT_MAX_MS) {
+    if (Date.now() - t0 < SELL_POLL_MS) log(`coin price ${pays} < ${SELL_MIN_PRICE} - waiting for the upswing (max ${Math.round(SELL_WAIT_MAX_MS / 1000)}s)`);
+    if (onTick) { try { await onTick(); } catch (e) { log("tick error:", e.message); } }
+    await sleep(SELL_POLL_MS);
+    await keepAlive();
+    pays = coinPrice(0).pays ?? pays;
+  }
+  const waited = Math.round((Date.now() - t0) / 1000);
+  log(`selling ${qty} ${COIN} to "${offer.merchantName}" at ${pays ?? "?"} each${waited >= SELL_POLL_MS / 1000 ? ` after ${waited}s wait` : ""} (${crystal} crystal before)`);
   const r = await action("trade", offer.merchantName, offer.itemId, String(qty));
   if (!r.ok) throw new Error(`trade failed: ${r.error}`);
   const o = r.data.outcome || {};
@@ -163,7 +202,7 @@ export async function sellAll(onTick) {
   if (o.status === "pending") await waitIdle("trade", { onTick });
   const after = getInventory();
   log(`inventory now: ${after.coins} ${COIN}, ${after.crystal} crystal`);
-  journal.note("batch", { sold: qty, earned: Math.max(0, after.crystal - crystal), crystal: after.crystal });
+  journal.note("batch", { sold: qty, earned: Math.max(0, after.crystal - crystal), crystal: after.crystal, price: pays ?? null, waitedS: waited });
   journal.note("crystal", { value: after.crystal });
   // proofs, not vibes: anchor the batch on Midnight (no-op unless configured)
   nightgate.enqueueDoc("batch", { date: new Date().toISOString().slice(0, 10), ts: Date.now(), coins: qty, earned: Math.max(0, after.crystal - crystal) });

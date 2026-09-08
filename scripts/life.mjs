@@ -16,6 +16,8 @@
  *   node scripts/life.mjs anchors pause [min] [reason]           # no on-chain transactions for <min> (default 30): queue waits, worker stops after its current tx
  *   node scripts/life.mjs anchors resume                          # end the pause, drain what queued up
  *   node scripts/life.mjs anchors status                          # pause state, queue length, worker, lifetime counters
+ *   node scripts/life.mjs anchors failed [--since=<days>]         # what failed (API outage etc.) and what can be re-anchored
+ *   node scripts/life.mjs anchors retry [--dry-run] [--since=<days>] [--no-verify]   # queue re-anchors for everything that failed + today's daily proof set
  *   node scripts/life.mjs progress        # skill level/XP, deliverable contracts, the tool mission (no lease needed)
  *   node scripts/life.mjs quests          # the contract plan across all skills: what is deliverable now, what blocks the rest (no lease needed)
  *   node scripts/life.mjs notary          # paid-notary orders and income
@@ -177,7 +179,11 @@ const ACTIVITY_WORDS = {
   sleep: "about to turn in at the Charging House",
   boot: "just getting started",
 };
-social.setStatusProvider(() => ({ ...refreshLive(), activity: ACTIVITY_WORDS[state.mode] || "between batches" }));
+social.setStatusProvider(() => {
+  // the coin price moves every 10 s: read it fresh-ish (20 s cache) so M₳X never quotes a stale number
+  const p = work.coinPrice();
+  return { ...refreshLive(), activity: ACTIVITY_WORDS[state.mode] || "between batches", coinPrice: p.pays, coinPriceLo: p.lo, coinPriceHi: p.hi };
+});
 
 /** Short status push every MCITY_STATUS_EVERY_HOURS (default 3). */
 let statusRunning = false;
@@ -525,12 +531,20 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
       } else if (sub === "resume") {
         const kicked = nightgate.resume();
         console.log(`anchoring resumed - ${nightgate.readQueue().length} queued${kicked ? ", worker started" : ""}`);
+      } else if (sub === "failed" || sub === "retry") {
+        // what failed while NIGHTGATE was down, and (retry) queue it again
+        const reanchor = await import("./lib/reanchor.mjs");
+        const flags = [n, ...rest].filter(Boolean);
+        const days = flags.find((f) => /^--since=\d+$/.test(f));
+        const sinceMs = days ? Date.now() - Number(days.split("=")[1]) * 86400_000 : 0;
+        if (sub === "failed" || flags.includes("--dry-run")) console.log(reanchor.describe(reanchor.plan({ sinceMs })));
+        else await reanchor.run({ sinceMs, verify: !flags.includes("--no-verify") });
       } else {
         const until = nightgate.pausedUntil();
         const st = nightgate.stats();
         console.log(`anchoring: ${until ? `PAUSED until ${new Date(until).toISOString()}` : "active"}`);
         console.log(`queue: ${nightgate.readQueue().length} item(s), worker ${nightgate.workerActive() ? "running" : "idle"}`);
-        console.log(`lifetime: ${st.ok} ok, ${st.failed} failed (${st.feeWasted || 0} refused on chain with the fee burned)`);
+        console.log(`lifetime: ${st.ok} ok, ${st.failed} failed (${st.feeWasted || 0} refused on chain with the fee burned, ${st.apiOutage || 0} lost to API outages, ${st.reanchored || 0} re-anchored later)`);
       }
     })()
   : cmd === "dashboard" ? (async () => {
