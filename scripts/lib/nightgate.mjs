@@ -167,14 +167,38 @@ export function sponsorUnbound(unboundTxB64, idempotencyKey, cfg = config()) {
   return callAction("sponsorUnboundTransaction", { unboundTxB64, sponsorSessionId: cfg.sponsorSessionId, idempotencyKey }, cfg);
 }
 
-/** Poll a job until it leaves the queue (succeeded/failed) or timeoutMs passes. */
+/** One job status read (sponsor jobs live under the sponsor session). */
+export function getJob(jobId, sessionId = config().sponsorSessionId, cfg = config()) {
+  return callAction("getJobStatus", { jobId, sessionId }, cfg);
+}
+
+/**
+ * Poll a job until it leaves the queue (succeeded/failed) or timeoutMs passes.
+ * A poll that times out or hits a 5xx is NOT a verdict: the API is busy
+ * (2026-09-09 06:07: one getJobStatus poll ran past the 30 s client timeout
+ * while the sponsor was submitting the very tx we were waiting for; the
+ * worker took that for an outage, rebuilt the tx and lost two hours to an
+ * idempotency-key collision) - keep polling until the window is used up and
+ * only then throw the last error.
+ */
 export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyMs = 5_000, cfg = config() } = {}) {
   const t0 = Date.now();
   let job;
+  let lastErr = null;
   for (;;) {
-    job = await callAction("getJobStatus", { jobId, sessionId }, cfg);
-    if (job.status === "succeeded" || job.status === "failed") return job;
-    if (Date.now() - t0 > timeoutMs) return job; // caller sees the non-final status
+    try {
+      job = await callAction("getJobStatus", { jobId, sessionId }, cfg);
+      lastErr = null;
+      if (job.status === "succeeded" || job.status === "failed") return job;
+    } catch (e) {
+      if (!isApiOutage(e.message)) throw e;
+      lastErr = e;
+      log(`getJobStatus ${jobId.slice(0, 8)}: ${e.message.slice(0, 80)} - polling on`);
+    }
+    if (Date.now() - t0 > timeoutMs) {
+      if (lastErr) throw lastErr;
+      return job; // caller sees the non-final status
+    }
     await new Promise((r) => setTimeout(r, everyMs));
   }
 }
@@ -497,6 +521,44 @@ function bumpStats(a) {
   const st = stats();
   applyStat(st, a);
   writeStats(st);
+}
+
+/**
+ * Turn a failed entry into the success it actually was: the worker wrote it
+ * off (outage retries exhausted) although its first transaction had landed -
+ * 2026-09-09: the `batches` claim, job succeeded 06:08, written off 08:24
+ * after two hours of idempotency-key collisions. Verifies the job with
+ * NIGHTGATE first (must be `succeeded` with a tx hash). Returns the new entry;
+ * throws when the job says otherwise or the entry is not a failure.
+ */
+export async function repairLanded(entryAt, jobId, cfg = config()) {
+  const at = Number(entryAt);
+  const old = history().find((a) => a.at === at);
+  if (!old) throw new Error(`no attestation entry with at=${entryAt}`);
+  if (old.ok) throw new Error(`entry ${entryAt} (${old.kind}) is already ok`);
+  const job = await getJob(jobId, cfg.sponsorSessionId, cfg);
+  if (job.status !== "succeeded" || !job.txHash) throw new Error(`job ${jobId} is ${job.status || "?"}${job.errorMessage ? ` (${job.errorMessage})` : ""} - nothing to repair`);
+  if (old.txHash && old.txHash !== job.txHash) throw new Error(`entry ${entryAt} names tx ${old.txHash}, job ${jobId} landed ${job.txHash}`);
+  const txExplorerHash = await resolveTxHash(job.txHash, cfg);
+  let verified;
+  if (old.payloadHash && ["attest", "attestReveal", "anchorContentRoot"].includes(old.call)) {
+    try { verified = !!(await verifyAttestation(old.payloadHash, cfg, old.vault || cfg.vault)).attested; } catch { verified = undefined; }
+  }
+  const { status, error, apiOutage, retries, ...rest } = old;
+  const entry = {
+    ...rest, ok: true, txHash: job.txHash, txExplorerHash, jobId,
+    ...(verified !== undefined ? { verified } : {}),
+    // written off by the worker, found landed later (life.mjs anchors landed)
+    repaired: Date.now(), repairedFrom: { status, error, ...(apiOutage ? { apiOutage, retries } : {}) },
+  };
+  updateHistory((a) => (a.at === at ? entry : a));
+  // the counters saw a failure: take it back, count the success
+  const st = stats();
+  st.failed = Math.max(0, st.failed - 1);
+  if (isOutageEntry(old)) st.apiOutage = Math.max(0, (st.apiOutage || 0) - 1);
+  applyStat(st, entry);
+  writeStats(st);
+  return entry;
 }
 
 /** The most recent successful attestation, or null. `kind` filters. */

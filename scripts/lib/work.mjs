@@ -213,12 +213,15 @@ export async function sellAll(onTick) {
  * Farm until `target` coins (or `untilMs` deadline), then sell.
  * Calls `onTick` between cycles (conversation polling) and `shouldStop()` to allow the day plan to interrupt.
  */
-export async function farmBatch({ target = 100, untilMs = Infinity, onTick = null, shouldStop = () => false } = {}) {
+export async function farmBatch({ target = 100, untilMs = Infinity, onTick = null, shouldStop = () => false, switchAfterMs = 0, minYield = 0 } = {}) {
   let { coins } = getInventory();
+  const startCoins = coins;
+  const startedAt = Date.now();
   log(`work: batch to ${target} ${COIN} (have ${coins})`);
   let failStreak = 0;
   let busySince = 0;
   let lastHunger = Date.now();
+  let switched = null;
   while (coins < target) {
     if (Date.now() > untilMs || shouldStop()) { log("work: stopping batch early (plan)"); break; }
     if (Date.now() - lastHunger > 120_000) { lastHunger = Date.now(); await maybeEat({ onTick }); }
@@ -229,15 +232,28 @@ export async function farmBatch({ target = 100, untilMs = Infinity, onTick = nul
       coins = getInventory().coins;
     } else if (result === "busy") {
       busySince ||= Date.now();
-      if (Date.now() - busySince >= BUSY_GIVE_UP_MS) { log("work: terminals busy for 20 minutes - giving the batch up for now"); break; }
+      if (Date.now() - busySince >= BUSY_GIVE_UP_MS) {
+        switched = "terminals busy for 20 minutes";
+        log(`work: ${switched} - giving the batch up for now`);
+        break;
+      }
     } else if (++failStreak >= 8) {
       log("work: 8 cycles without coins - giving up this batch");
+      break;
+    }
+    // the daytime picture (2026-09-09: 7 coins in 30 min, 92% of the attempts
+    // bounced): after `switchAfterMs` with fewer than `minYield` coins gained,
+    // hand the time to other work instead of standing at a taken terminal
+    if (switchAfterMs && Date.now() - startedAt >= switchAfterMs && coins - startCoins < minYield) {
+      switched = `${coins - startCoins} coins in ${Math.round((Date.now() - startedAt) / 60_000)} min (terminals taken)`;
+      log(`work: ${switched} - switching to other work`);
       break;
     }
     if (onTick) { try { await onTick(); } catch (e) { log("tick error:", e.message); } }
     await keepAlive();
   }
-  const sold = await sellAll(onTick);
+  // a switched batch keeps its few coins for the next one (no 4-minute price wait for 7 coins)
+  const sold = switched && coins < target ? { sold: 0 } : await sellAll(onTick);
   await maybeEat({ threshold: EAT_AT_HUNGER - 20, onTick });
-  return { coins, ...sold };
+  return { coins, ...sold, ...(switched ? { switched: true, reason: switched } : {}) };
 }

@@ -18,6 +18,7 @@
  *   node scripts/life.mjs anchors status                          # pause state, queue length, worker, lifetime counters
  *   node scripts/life.mjs anchors failed [--since=<days>]         # what failed (API outage etc.) and what can be re-anchored
  *   node scripts/life.mjs anchors retry [--dry-run] [--since=<days>] [--no-verify]   # queue re-anchors for everything that failed + today's daily proof set
+ *   node scripts/life.mjs anchors landed <entry.at> <jobId>       # a written-off entry whose NIGHTGATE job did succeed: record it as the success it was
  *   node scripts/life.mjs progress        # skill level/XP, deliverable contracts, the tool mission (no lease needed)
  *   node scripts/life.mjs quests          # the contract plan across all skills: what is deliverable now, what blocks the rest (no lease needed)
  *   node scripts/life.mjs notary          # paid-notary orders and income
@@ -32,6 +33,8 @@
  *   MCITY_STATUS_EVERY_HOURS=3            short status push every N hours (0 = off); test: life.mjs push-status
  *   MCITY_WEIGHTS=work:40,social:20,explore:20,quest:20   (a key left out keeps its default; quest:0 turns contract runs off)
  *   MCITY_MAX_QUESTS=3 MCITY_QUEST_MAX_MIN=90   contract runs per day and the time budget of one run (scripts/lib/quest.mjs)
+ *   MCITY_WORK_SWITCH_MIN=30 MCITY_WORK_MIN_YIELD=15   a batch with fewer coins than that after N min hands its time to other work (0 = wait at the terminal)
+ *   MCITY_ALTWORK_MAX_GATHERS=100        gathers that other work may spend (contracts + grind at free nodes; not a quest run)
  *   MCITY_NOTARY_PRICE=10                 crystal per anchor for other agents (0 = all free); MCITY_NOTARY_FREE_FIRST=1
  *   MCITY_PROGRESS_EVERY_MIN=60           contracts/tool check while working, independent of batch ends (0 = only after batches)
  *   MCITY_SKILL=hacking                   skill tracked after every batch; MCITY_TOOL_GOAL=cinder_decoder (""=off):
@@ -89,6 +92,12 @@ const cfg = {
   progressEveryMs: Number(process.env.MCITY_PROGRESS_EVERY_MIN ?? 60) * 60_000, // contracts/tool check between batches (work mode); 0 = off
   batchTarget: 100,
   batchMaxMs: 2 * 3600_000,
+  // terminals taken: after N minutes with fewer than `workMinYield` coins the
+  // batch hands its remaining time to other work (contracts + grind at free
+  // nodes, up to `altWorkMaxGathers` gathers); 0 = keep waiting at the terminal
+  workSwitchMs: Number(process.env.MCITY_WORK_SWITCH_MIN ?? 30) * 60_000,
+  workMinYield: Number(process.env.MCITY_WORK_MIN_YIELD ?? 15),
+  altWorkMaxGathers: Number(process.env.MCITY_ALTWORK_MAX_GATHERS ?? 100),
   socialMinMs: 8 * 60_000,
   socialMaxMs: 22 * 60_000,
   hangoutAreas: ["central-plaza", "partner-plaza", "hacker-house", "bison-valley"],
@@ -282,18 +291,39 @@ function msUntilSleepEnd() {
 async function doWork() {
   setMode("work");
   const before = getInventory().crystal;
+  const until = Date.now() + cfg.batchMaxMs;
   const r = await work.farmBatch({
     target: cfg.batchTarget,
-    untilMs: Date.now() + cfg.batchMaxMs,
+    untilMs: until,
     onTick: tick,
     shouldStop: () => inSleepWindow(),
+    switchAfterMs: cfg.workSwitchMs,
+    minYield: cfg.workMinYield,
   });
-  state.today.batches++;
+  if (!r.switched) state.today.batches++;
   state.today.coinsSold += r.sold || 0;
   if (r.crystal) state.today.crystalEarned += Math.max(0, r.crystal - before);
   saveState();
+  if (r.switched) await doAltWork(until, r.reason);
   // skill snapshot, contracts the game accepts right now, the tool mission
   await progress.afterBatch({ onTick: tick });
+}
+
+/**
+ * The terminals are taken: spend the batch's remaining time on work nobody
+ * competes for - deliverable contracts, then grinding XP at free nodes
+ * (scripts/lib/quest.mjs, not counted as a quest run). The coins in the bag
+ * carry over to the next batch.
+ */
+async function doAltWork(untilMs, reason) {
+  const budget = Math.min(untilMs - Date.now(), msUntilSleepStart());
+  if (budget < 5 * 60_000) { log(`work: ${reason} - too little time left for other work`); return; }
+  log(`work: ${reason} -> other work for up to ${Math.round(budget / 60_000)} min`);
+  state.today.altWork = (state.today.altWork || 0) + 1;
+  saveState();
+  journal.note("altwork", { reason });
+  const r = await quest.runOnce({ onTick: tick, maxMs: budget, maxGathers: cfg.altWorkMaxGathers, countRun: false, label: "alt-work" });
+  if (r) log(`work: other work done - ${r.contracts} contract(s), ${r.gathers} gather(s), +${r.xp} XP`);
 }
 
 async function doSocial() {
@@ -539,6 +569,14 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
         const sinceMs = days ? Date.now() - Number(days.split("=")[1]) * 86400_000 : 0;
         if (sub === "failed" || flags.includes("--dry-run")) console.log(reanchor.describe(reanchor.plan({ sinceMs })));
         else await reanchor.run({ sinceMs, verify: !flags.includes("--no-verify") });
+      } else if (sub === "landed") {
+        // a written-off entry whose NIGHTGATE job did succeed: record the success it was
+        const jobId = rest[0];
+        if (!/^\d{13}$/.test(n || "") || !jobId) throw new Error("usage: anchors landed <entry.at> <jobId>   (at = the failed entry's timestamp in data/attestations.json, jobId from NIGHTGATE)");
+        const entry = await nightgate.repairLanded(n, jobId);
+        journal.note("attest", { kind: entry.kind, call: entry.call, ok: true, repaired: true, payloadHash: entry.payloadHash, txHash: entry.txHash, network: entry.network });
+        console.log(`${entry.kind}/${entry.call} of ${new Date(entry.at).toISOString()}: now ok, tx ${entry.txHash}${entry.txExplorerHash ? ` (explorer ${entry.txExplorerHash})` : ""}${entry.verified !== undefined ? `, verified=${entry.verified}` : ""}`);
+        console.log(`was: ${entry.repairedFrom.status} - ${entry.repairedFrom.error || "?"}`);
       } else {
         const until = nightgate.pausedUntil();
         const st = nightgate.stats();

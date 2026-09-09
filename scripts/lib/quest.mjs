@@ -12,8 +12,16 @@
  * current levels, which sources are free), the static catalog (what each
  * contract needs, what each source yields, what each contract rewards) and
  * the inventory. Chains resolve automatically ("river eel" -> contract A ->
- * its reward document -> contract B). Recipes (workstations) are not planned
- * yet - such contracts show up as blocked with the reason.
+ * its reward document -> contract B), recipes too (gather the inputs, craft
+ * at the workstation, deliver).
+ *
+ * Two kinds of "blocked" are not final (2026-09-09): a source whose level-1
+ * nodes are all taken right now (10 tree stands, 3 ore veins - shared with
+ * every lumberjack and miner) stays `contested` and is rechecked with fresh
+ * occupancy after the contracts; an item that is only a rare drop (2.5% per
+ * gather: the four "pristine" contract items) makes its source a lottery the
+ * grind plays first. After grind and crafts the plan is redone once more and
+ * whatever became deliverable from the bag is delivered.
  *
  *   run:  for each plannable contract: gather the missing item(s) at a free
  *         node (`gather <nodeId>`), walk to the contract area, deliver;
@@ -87,22 +95,44 @@ export function plan({ prog, resources, inv }) {
   const skills = prog.skills || {};
   const level = (s) => Number(skills[s]?.level || 1);
   const nodeInfo = new Map(resources.map((n) => [n.id, n]));
-  // free sources (the game says gatherable) -> what they yield
+  // sources at the current levels -> what they yield. "no source node is
+  // available" is not a verdict but the moment's occupancy (the 10 level-1
+  // tree stands are shared with every lumberjack, the 3 ore veins with every
+  // miner): such a source stays in the plan as `contested` and is checked
+  // again on every run - the contracts behind it are worth 6 of 10 blockers
+  // (log, ore, plank, metal bar, both inspection reports; 2026-09-09)
   const sources = [];
+  const contested = [];
   for (const s of prog.capabilities?.sources || []) {
-    if (s.failureReason || SKIP_SOURCES.has(s.sourceId)) continue;
+    if (SKIP_SOURCES.has(s.sourceId)) continue;
+    if (s.failureReason && !NO_NODE.test(s.failureReason)) continue;
     const def = catalog.definition("source", s.sourceId);
     if (!def) continue;
     // progression lists at most ~10 node ids per source; `resources` has them
-    // all (node.kind == sourceId) - the forest alone has 100+ tree stands
-    const nodes = nodesOf(s.sourceId, resources);
+    // all - but node.kind is the node FAMILY (tree_stand covers the level-11
+    // orchards too), so only nodes yielding this source's output count
+    const nodes = nodesOf(def, resources);
     for (const id of [...(s.nodeIds || []), ...(s.availableNodeIds || [])]) {
       if (!nodes.some((n) => n.id === id)) nodes.push(nodeInfo.get(id) || { id, state: "unknown", availableToAgent: true, areaId: null, distance: 9e9 });
     }
-    sources.push({ sourceId: s.sourceId, skill: def.skill, xp: Number(def.xp || 0), outputs: def.outputs || [], nodes, areaId: nodes.find((n) => n.areaId)?.areaId || null });
+    const free = nodes.filter(isFree);
+    const src = {
+      sourceId: s.sourceId, skill: def.skill, xp: Number(def.xp || 0), outputs: def.outputs || [], rareOutputs: def.rareOutputs || [],
+      nodes, freeNodes: free.length, areaId: nodes.find((n) => n.areaId)?.areaId || null, wantedRare: [],
+    };
+    if (free.length || (!s.failureReason && !nodes.length)) sources.push(src);
+    else contested.push(src);
   }
-  const producers = new Map(); // itemId -> source (normal outputs only; rare drops are luck, not a plan)
+  const producers = new Map(); // itemId -> source (normal outputs only; rare drops are a lottery, see below)
   for (const s of sources) for (const o of s.outputs) if (!producers.has(o.itemId)) producers.set(o.itemId, s);
+  const contestedFor = new Map(); // itemId -> source whose level-1 nodes are all taken right now
+  for (const s of contested) for (const o of s.outputs) if (!producers.has(o.itemId) && !contestedFor.has(o.itemId)) contestedFor.set(o.itemId, s);
+  // rare drops of free sources: not plannable, but the grind fishes for them
+  // (2.5% per gather; four level-1 contracts want one each)
+  const lottery = new Map(); // itemId -> { source, chance }
+  for (const s of sources) for (const r of s.rareOutputs) for (const o of r.outputs || []) {
+    if (!producers.has(o.itemId) && !lottery.has(o.itemId)) lottery.set(o.itemId, { source: s, chance: Number(r.chanceBasisPoints || 0) / 100 });
+  }
 
   // candidate contracts at the current levels
   const candidates = [];
@@ -154,10 +184,12 @@ export function plan({ prog, resources, inv }) {
       if (dep && dep.contractId !== c.contractId) {
         const r = resolve(dep, [...stack, c.contractId]);
         if (r.ok) { deps.push(dep.contractId); depth = Math.max(depth, r.depth + 1); continue; }
+        return fail(c, `${req.itemId} comes from ${dep.contractId}, which is blocked (${r.reason})`);
       }
       // a recipe whose inputs all come from free sources (or the bag): gather the
       // inputs, craft at its workstation, then deliver
       const recipe = recipes.find((r) => (r.outputs || []).some((o) => o.itemId === req.itemId));
+      let blockedInput = null; // the recipe input that has no free source
       if (recipe && recipe.usable) {
         const per = Number(recipe.outputs.find((o) => o.itemId === req.itemId)?.quantity || 1);
         const batches = Math.ceil(missing / per);
@@ -169,7 +201,7 @@ export function plan({ prog, resources, inv }) {
           const short = need - got;
           if (short > 0) {
             const s2 = producers.get(inp.itemId);
-            if (!s2) { feasible = false; break; }
+            if (!s2) { feasible = false; blockedInput = inp.itemId; break; }
             const per2 = Number(s2.outputs.find((o) => o.itemId === inp.itemId)?.quantity || 1);
             inputGathers.push({ sourceId: s2.sourceId, skill: s2.skill, xp: s2.xp, itemId: inp.itemId, count: Math.ceil(short / per2), wanted: need, nodes: s2.nodes, areaId: s2.areaId });
           }
@@ -181,9 +213,21 @@ export function plan({ prog, resources, inv }) {
           continue;
         }
       }
-      return fail(c, recipe
-        ? `needs ${req.itemId} (crafted at ${recipe.workstationType || "a workstation"}, ${recipe.skill} ${recipe.requiredLevel}${recipe.usable ? ", an input has no free source" : ""})`
-        : `no free source for ${req.itemId}`);
+      const taken = contestedFor.get(req.itemId);
+      if (taken) return fail(c, `${req.itemId}: all ${taken.nodes.length} level-1 node${taken.nodes.length === 1 ? "" : "s"} of ${taken.sourceId} taken right now - checked again every run`);
+      const luck = lottery.get(req.itemId);
+      if (luck) {
+        // tell the grind to spend gathers there; the item lands in the bag by chance
+        luck.source.wantedRare.push({ itemId: req.itemId, chance: luck.chance, contractId: c.contractId, xp: c.xp });
+        return fail(c, `${req.itemId}: rare drop (${luck.chance}% per gather) at ${luck.source.sourceId} - the grind fishes for it`);
+      }
+      if (recipe) {
+        const inputTaken = blockedInput && contestedFor.get(blockedInput);
+        const why = inputTaken ? ` - input ${blockedInput}: all ${inputTaken.nodes.length} level-1 nodes of ${inputTaken.sourceId} taken right now`
+          : blockedInput ? ` - input ${blockedInput} has no free source` : "";
+        return fail(c, `needs ${req.itemId} (crafted at ${recipe.workstationType || "a workstation"}, ${recipe.skill} ${recipe.requiredLevel})${why}`);
+      }
+      return fail(c, `no free source for ${req.itemId}`);
     }
     const r = { ok: true, gathers, crafts, deps, depth };
     resolved.set(c.contractId, r);
@@ -209,11 +253,25 @@ export function plan({ prog, resources, inv }) {
     || s(a.gathers[0]?.areaId).localeCompare(s(b.gathers[0]?.areaId))
     || s(a.areaId).localeCompare(s(b.areaId))
     || b.xp - a.xp);
-  return { ready, blocked, sources, recipes };
+  return { ready, blocked, sources, recipes, contested, lottery: [...lottery.entries()].map(([itemId, l]) => ({ itemId, sourceId: l.source.sourceId, chance: l.chance })) };
 }
 
-/** All live nodes of one source (resources read: node.kind is the source id). */
-const nodesOf = (sourceId, resources) => resources.filter((n) => n.kind === sourceId);
+const NO_NODE = /no source node is available/i;
+
+/** A node M₳X could gather at right now. */
+const isFree = (n) => n.availableToAgent !== false && !n.reservedBy && (n.state === "available" || n.state === "unknown");
+
+/**
+ * All live nodes of one source. `node.kind` is the node family (tree_stand is
+ * every tree in the forest, the level-41 groves included; ore_vein every vein
+ * in the cave), so a node counts only when it yields what this source yields -
+ * 2026-09-07 the run tried three "tree stands" that were really reserved
+ * level-11 orchards and gave up although 100 trees were free.
+ */
+function nodesOf(def, resources) {
+  const yields = new Set((def.outputs || []).map((o) => o.itemId));
+  return resources.filter((n) => n.kind === def.id && (!n.yieldItemId || !yields.size || yields.has(n.yieldItemId)));
+}
 
 /**
  * Recipes the game has unlocked at the current levels, joined with the static
@@ -241,7 +299,7 @@ function recipesOf(prog) {
 
 /** Best node of a source right now: free, not reserved, nearest. */
 function pickNode(nodes) {
-  const free = nodes.filter((n) => n.availableToAgent !== false && !n.reservedBy && (n.state === "available" || n.state === "unknown"));
+  const free = nodes.filter(isFree);
   const pool = free.length ? free : nodes;
   return pool.slice().sort((a, b) => (a.distance ?? 9e9) - (b.distance ?? 9e9))[0] || null;
 }
@@ -249,6 +307,15 @@ function pickNode(nodes) {
 // ---------- actions ----------
 
 let lastMeal = 0;
+// the area M₳X was last walked to in this run: a node's `sameSpace` comes from
+// the plan-time snapshot, so without this every canal cast paid a move-area
+// walk back to the area anchor first (~1 min per gather, 2026-09-09 14:50)
+let atArea = null;
+async function walkTo(areaId, label, onTick) {
+  if (atArea === areaId) return;
+  await goTo(areaId, label, onTick);
+  atArea = areaId;
+}
 async function upkeep(onTick) {
   await keepAlive();
   if (onTick) { try { await onTick(); } catch (e) { log("tick error:", e.message); } }
@@ -266,8 +333,10 @@ export async function gatherOnce(src, onTick) {
     const node = pickNode(nodes.filter((n) => !tried.has(n.id)));
     if (!node) return { ok: false, reason: "no node left to try" };
     tried.add(node.id);
-    if (node.sameSpace === false && node.areaId) {
-      try { await goTo(node.areaId, `${src.sourceId} at ${node.areaId}`, onTick); } catch (e) { return { ok: false, reason: e.message }; }
+    // walk when the game said "other space" at plan time and we have not been
+    // there yet, or when this run last walked somewhere else
+    if (node.areaId && (atArea ? atArea !== node.areaId : node.sameSpace === false)) {
+      try { await walkTo(node.areaId, `${src.sourceId} at ${node.areaId}`, onTick); } catch (e) { return { ok: false, reason: e.message }; }
     }
     await waitIdle("before-gather", { onTick });
     const r = await action("gather", node.id);
@@ -279,7 +348,7 @@ export async function gatherOnce(src, onTick) {
       // refresh reservations (and pick up nodes we did not know), try another one
       try {
         const live = readResources();
-        const fresh = nodesOf(src.sourceId, live);
+        const fresh = nodesOf({ id: src.sourceId, outputs: src.outputs }, live);
         nodes = fresh.length ? fresh : nodes.map((n) => live.find((x) => x.id === n.id) || n);
       } catch { /* keep what we have */ }
       await sleep(5_000);
@@ -300,7 +369,8 @@ export async function deliverOne(c, onTick) {
   let live = check();
   if (live.completed) { log(`contract ${c.contractId}: already completed`); return false; }
   if (/not in contract area/i.test(live.failureReason || "")) {
-    await goTo(c.areaId, `contract area ${c.areaId}`, onTick);
+    atArea = null; // the game says we are elsewhere - walk for real
+    await walkTo(c.areaId, `contract area ${c.areaId}`, onTick);
     await sleep(3_000);
     live = check();
   }
@@ -356,7 +426,8 @@ export async function craftOne(k, onTick) {
   const liveRow = () => (readProgression().capabilities?.recipes || []).find((r) => r.recipeId === k.recipeId) || {};
   let row = liveRow();
   if (!row.craftableBatches || /not at|workstation|area/i.test(row.failureReason || "")) {
-    try { await goTo(k.areaId, `${k.workstationType || "workstation"} at ${k.areaId}`, onTick); } catch (e) { return { ok: false, reason: e.message }; }
+    atArea = null; // the game decides whether we stand at the station - walk for real
+    try { await walkTo(k.areaId, `${k.workstationType || "workstation"} at ${k.areaId}`, onTick); } catch (e) { return { ok: false, reason: e.message }; }
     await sleep(2_000);
     row = liveRow();
   }
@@ -409,9 +480,12 @@ async function grind({ sources, recipes, prog, deadline, budget, onTick }) {
   const value = (s) => s.xp + (recipes || []).filter((r) => r.usable && r.inputs.length === 1 && s.outputs.some((o) => o.itemId === r.inputs[0].itemId)).reduce((a, r) => a + r.xp, 0);
   let done = 0;
   const bad = new Set();
+  // sources a blocked contract's rare drop comes from go first: a node gives
+  // 5 gathers before it depletes, so each run buys ~5 tickets per lottery
+  const wanted = (s) => (s.wantedRare?.length ? 1 : 0);
   while (done < budget && Date.now() < deadline) {
     const order = sources.filter((s) => !bad.has(s.sourceId))
-      .sort((a, b) => value(b) - value(a) || xpOf(a.skill) - xpOf(b.skill) || (a.nodes[0]?.distance ?? 9e9) - (b.nodes[0]?.distance ?? 9e9));
+      .sort((a, b) => wanted(b) - wanted(a) || value(b) - value(a) || xpOf(a.skill) - xpOf(b.skill) || (a.nodes[0]?.distance ?? 9e9) - (b.nodes[0]?.distance ?? 9e9));
     const src = order[0];
     if (!src) break;
     const r = await gatherOnce(src, onTick);
@@ -430,26 +504,16 @@ async function grind({ sources, recipes, prog, deadline, budget, onTick }) {
  * One contract run: plan, gather, deliver, grind, snapshot. A failed step
  * never aborts the run; returns the summary (null when nothing was possible).
  */
-export async function runOnce({ onTick = null, maxMs = 90 * 60_000 } = {}) {
-  await catalog.ensure();
-  if (!catalog.ready()) { log("quest: no catalog - skipping"); return null; }
-  const deadline = Date.now() + maxMs;
-  const st = loadState();
-  st.runs = { ...(st.runs || {}), [today()]: (st.runs?.[today()] || 0) + 1 };
-  saveState();
-  const prog = readProgression();
-  const p = plan({ prog, resources: readResources(), inv: readInventory() });
-  const planXp = p.ready.reduce((a, c) => a + c.xp + c.gathers.reduce((x, g) => x + g.count * g.xp, 0), 0);
-  log(`quest: ${p.ready.length} contract(s) plannable (${planXp} XP), ${p.blocked.length} blocked, ${p.sources.length} free sources${GRIND ? ", grind after" : ""}`);
-  for (const c of p.ready) log(`  plan: ${c.contractId} (${c.skill}, +${c.xp}) @ ${c.areaId} via ${c.via}`);
-  const done = { contracts: [], gathers: 0, crafts: 0, xp: 0, skills: new Set(), failed: [] };
-  lastMeal = Date.now();
-  await maybeEat({ threshold: 45, onTick });
-
+/**
+ * Gather, craft and deliver every ready contract of a plan (skipping the ones
+ * already handled in this run). Mutates `done`.
+ */
+async function executeContracts(p, done, { onTick, deadline, maxGathers, label }) {
   for (const c of p.ready) {
-    if (Date.now() > deadline) { log("quest: time budget used"); break; }
-    if (done.gathers >= MAX_GATHERS) { log("quest: gather cap reached"); break; }
-    if (c.deps.some((d) => done.failed.includes(d))) { log(`quest: ${c.contractId} skipped, its chain failed`); done.failed.push(c.contractId); continue; }
+    if (done.contracts.includes(c.contractId) || done.failed.includes(c.contractId)) continue;
+    if (Date.now() > deadline) { log(`${label}: time budget used`); break; }
+    if (done.gathers >= maxGathers) { log(`${label}: gather cap reached`); break; }
+    if (c.deps.some((d) => done.failed.includes(d))) { log(`${label}: ${c.contractId} skipped, its chain failed`); done.failed.push(c.contractId); continue; }
     let ok = true;
     for (const g of c.gathers) {
       // until the bag holds what the contract asks for (a source may yield one
@@ -457,21 +521,21 @@ export async function runOnce({ onTick = null, maxMs = 90 * 60_000 } = {}) {
       const wanted = Number(c.requirements.find((x) => x.itemId === g.itemId)?.quantity || 1);
       let tries = 0;
       while ((readInventory()[g.itemId] || 0) < wanted) {
-        if (tries++ >= g.count + 3 || done.gathers >= MAX_GATHERS || Date.now() > deadline) { ok = false; break; }
+        if (tries++ >= g.count + 3 || done.gathers >= maxGathers || Date.now() > deadline) { ok = false; break; }
         const r = await gatherOnce(g, onTick);
-        if (!r.ok) { log(`quest: ${c.contractId} - could not gather ${g.itemId} (${r.reason})`); ok = false; break; }
+        if (!r.ok) { log(`${label}: ${c.contractId} - could not gather ${g.itemId} (${r.reason})`); ok = false; break; }
         done.gathers++;
         done.xp += g.xp;
         done.skills.add(g.skill);
         await upkeep(onTick);
       }
-      if (!ok) { log(`quest: ${c.contractId} - ${g.itemId} still missing after ${tries} gather(s)`); break; }
+      if (!ok) { log(`${label}: ${c.contractId} - ${g.itemId} still missing after ${tries} gather(s)`); break; }
     }
     // recipes on the way to the requirement (inputs are in the bag now)
     for (const k of ok ? c.crafts || [] : []) {
       if ((readInventory()[k.itemId] || 0) >= k.wanted) continue;
       const r = await craftOne(k, onTick);
-      if (!r.ok) { log(`quest: ${c.contractId} - could not craft ${k.recipeId} (${r.reason})`); ok = false; break; }
+      if (!r.ok) { log(`${label}: ${c.contractId} - could not craft ${k.recipeId} (${r.reason})`); ok = false; break; }
       done.crafts++;
       done.xp += r.xp;
       done.skills.add(k.skill);
@@ -481,46 +545,93 @@ export async function runOnce({ onTick = null, maxMs = 90 * 60_000 } = {}) {
     try {
       if (await deliverOne(c, onTick)) { done.contracts.push(c.contractId); done.xp += c.xp; done.skills.add(c.skill); }
       else done.failed.push(c.contractId);
-    } catch (e) { log(`quest: deliver ${c.contractId} failed: ${e.message}`); done.failed.push(c.contractId); }
+    } catch (e) { log(`${label}: deliver ${c.contractId} failed: ${e.message}`); done.failed.push(c.contractId); }
     await upkeep(onTick);
   }
+}
 
-  if (GRIND && Date.now() < deadline && done.gathers < MAX_GATHERS && p.sources.length) {
-    const n = await grind({ sources: p.sources, recipes: p.recipes, prog, deadline, budget: MAX_GATHERS - done.gathers, onTick });
-    log(`quest: grind ${n} gather(s)`);
+const freshPlan = () => plan({ prog: readProgression(), resources: readResources(), inv: readInventory() });
+
+/**
+ * One contract run: plan, gather, deliver, grind, snapshot. A failed step
+ * never aborts the run; returns the summary (null when nothing was possible).
+ *
+ * Options: maxMs (time budget), maxGathers (default MCITY_QUEST_MAX_GATHERS),
+ * countRun (false = does not count against MCITY_MAX_QUESTS - the work mode's
+ * fallback when the terminals are taken), label (log prefix).
+ *
+ * The plan is redone with fresh occupancy after the contracts and after the
+ * grind: a tree stand that was taken at the start may be free by then, a
+ * rare drop the grind fished out makes its contract deliverable right away.
+ */
+export async function runOnce({ onTick = null, maxMs = 90 * 60_000, maxGathers = MAX_GATHERS, countRun = true, label = "quest" } = {}) {
+  await catalog.ensure();
+  if (!catalog.ready()) { log(`${label}: no catalog - skipping`); return null; }
+  const deadline = Date.now() + maxMs;
+  const st = loadState();
+  if (countRun) st.runs = { ...(st.runs || {}), [today()]: (st.runs?.[today()] || 0) + 1 };
+  saveState();
+  const prog = readProgression();
+  const p = plan({ prog, resources: readResources(), inv: readInventory() });
+  const planXp = p.ready.reduce((a, c) => a + c.xp + c.gathers.reduce((x, g) => x + g.count * g.xp, 0), 0);
+  const fishing = p.sources.filter((s) => s.wantedRare.length);
+  log(`${label}: ${p.ready.length} contract(s) plannable (${planXp} XP), ${p.blocked.length} blocked (${p.contested.length} source(s) taken right now, ${fishing.length} rare-drop lotteries), ${p.sources.length} free sources${GRIND ? ", grind after" : ""}, up to ${maxGathers} gathers`);
+  for (const c of p.ready) log(`  plan: ${c.contractId} (${c.skill}, +${c.xp}) @ ${c.areaId} via ${c.via}`);
+  for (const s of p.contested) log(`  taken: ${s.sourceId} (${s.nodes.length} node(s), ${s.outputs.map((o) => o.itemId).join("+")}) - rechecked before the grind`);
+  for (const s of fishing) log(`  lottery: ${s.sourceId} may drop ${s.wantedRare.map((w) => `${w.itemId} (${w.chance}%, ${w.contractId})`).join(", ")}`);
+  const done = { contracts: [], gathers: 0, crafts: 0, xp: 0, skills: new Set(), failed: [] };
+  lastMeal = Date.now();
+  atArea = null; // wherever the previous mode left M₳X, the first gather walks
+  await maybeEat({ threshold: 45, onTick });
+
+  const ctx = { onTick, deadline, maxGathers, label };
+  await executeContracts(p, done, ctx);
+
+  // second look with fresh occupancy: a contested node may have come free
+  let p2 = p;
+  if (p.contested.length && Date.now() < deadline && done.gathers < maxGathers) {
+    try {
+      p2 = freshPlan();
+      const now = p2.ready.filter((c) => !done.contracts.includes(c.contractId) && !done.failed.includes(c.contractId));
+      if (now.length) { log(`${label}: ${now.length} contract(s) became plannable - ${now.map((c) => c.contractId).join(", ")}`); await executeContracts(p2, done, ctx); }
+    } catch (e) { log(`${label}: re-plan failed: ${e.message}`); }
+  }
+
+  if (GRIND && Date.now() < deadline && done.gathers < maxGathers && p2.sources.length) {
+    const n = await grind({ sources: p2.sources, recipes: p2.recipes, prog, deadline, budget: maxGathers - done.gathers, onTick });
+    log(`${label}: grind ${n} gather(s)`);
     done.gathers += n;
   }
 
   // workstations: turn what the bag holds into crafted goods (and XP), then
-  // deliver whatever contract that unlocked without gathering again
+  // deliver whatever the grind (a rare drop) or the crafts unlocked
   if (Date.now() < deadline) {
     try {
       const k = await craftAll({ onTick, deadline });
       done.crafts += k.crafts;
       done.xp += k.xp;
       for (const s of k.skills) done.skills.add(s);
-      if (k.crafts) {
-        const again = plan({ prog: readProgression(), resources: readResources(), inv: readInventory() }).ready.filter((c) => !c.gathers.length && !c.crafts.length && !done.failed.includes(c.contractId));
-        for (const c of again) {
-          if (Date.now() > deadline) break;
-          try {
-            if (await deliverOne(c, onTick)) { done.contracts.push(c.contractId); done.xp += c.xp; done.skills.add(c.skill); }
-          } catch (e) { log(`quest: deliver ${c.contractId} failed: ${e.message}`); }
-          await upkeep(onTick);
-        }
+      const again = freshPlan().ready.filter((c) => !c.gathers.length && !c.crafts.length && !done.failed.includes(c.contractId) && !done.contracts.includes(c.contractId));
+      if (again.length) log(`${label}: ${again.length} contract(s) deliverable from the bag - ${again.map((c) => c.contractId).join(", ")}`);
+      for (const c of again) {
+        if (Date.now() > deadline) break;
+        try {
+          if (await deliverOne(c, onTick)) { done.contracts.push(c.contractId); done.xp += c.xp; done.skills.add(c.skill); }
+        } catch (e) { log(`${label}: deliver ${c.contractId} failed: ${e.message}`); }
+        await upkeep(onTick);
       }
     } catch (e) { log("craft pass failed:", e.message); }
   }
 
   let snap = null;
   try { snap = await snapshotSkills(); } catch (e) { log("skills snapshot failed:", e.message); }
-  const summary = { contracts: done.contracts.length, xp: done.xp, gathers: done.gathers, crafts: done.crafts, skills: [...done.skills], failed: done.failed, totalXp: snap?.total ?? null };
+  const summary = { contracts: done.contracts.length, xp: done.xp, gathers: done.gathers, crafts: done.crafts, skills: [...done.skills], failed: done.failed, totalXp: snap?.total ?? null, ...(countRun ? {} : { altWork: true }) };
   journal.note("quest", { ...summary, contractIds: done.contracts });
   if (done.contracts.length || done.gathers) nightgate.enqueueDoc("quest", { date: today(), ts: Date.now(), contracts: done.contracts.length, xp: done.xp, gathers: done.gathers });
   st.lastRun = { at: Date.now(), ...summary };
   st.lastPlan = { at: Date.now(), ready: p.ready.length - done.contracts.length, blocked: p.blocked.length };
   saveState();
-  log(`quest: done - ${done.contracts.length} contract(s), ${done.gathers} gather(s), ${done.crafts} craft(s), +${done.xp} XP${snap ? `, ${snap.total} XP total` : ""}`);
+  log(`${label}: done - ${done.contracts.length} contract(s), ${done.gathers} gather(s), ${done.crafts} craft(s), +${done.xp} XP${snap ? `, ${snap.total} XP total` : ""}`);
   return summary;
 }
 
@@ -564,7 +675,10 @@ export async function describe() {
     lines.push(`blocked: ${p.blocked.length}`);
     for (const b of p.blocked) lines.push(`  ${b.contractId}  [${b.skill} +${b.xp}]  ${b.reason}`);
   }
-  if (p.sources.length) lines.push(`free sources: ${p.sources.map((s) => `${s.sourceId} (${s.skill}, ${s.nodes.length} node${s.nodes.length === 1 ? "" : "s"}${s.areaId ? ` @ ${s.areaId}` : ""})`).join(", ")}`);
+  if (p.sources.length) lines.push(`free sources: ${p.sources.map((s) => `${s.sourceId} (${s.skill}, ${s.freeNodes}/${s.nodes.length} node${s.nodes.length === 1 ? "" : "s"} free${s.areaId ? ` @ ${s.areaId}` : ""})`).join(", ")}`);
+  if (p.contested.length) lines.push(`taken right now (rechecked every run): ${p.contested.map((s) => `${s.sourceId} (${s.skill}, ${s.nodes.length} level-1 node${s.nodes.length === 1 ? "" : "s"}${s.areaId ? ` @ ${s.areaId}` : ""}: ${s.nodes.map((n) => n.state + (n.reservedBy ? "/reserved" : "")).join(", ")})`).join("; ")}`);
+  const fishing = p.sources.filter((s) => s.wantedRare.length);
+  if (fishing.length) lines.push(`lotteries the grind plays first: ${fishing.map((s) => `${s.sourceId} -> ${s.wantedRare.map((w) => `${w.itemId} ${w.chance}%`).join(", ")}`).join("; ")}`);
   const usable = p.recipes.filter((r) => r.usable);
   if (usable.length) {
     const now = usable.filter((r) => r.craftableBatches > 0);

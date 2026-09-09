@@ -27,6 +27,12 @@
  * NIGHTGATE_OUTAGE_RETRIES times, ~2 h). Only then is it written off - with its
  * doc and metadataHash, so `life.mjs anchors retry` can re-anchor it later
  * (2026-09-08: an outage cost eight anchors and the daily report set).
+ * An outage retry never builds again: the built transaction and, once
+ * accepted, the job id live on the queue item (`inflight`) and the retry
+ * resumes from there - a rebuilt transaction under the same idempotency key
+ * is a different payload, NIGHTGATE refuses it with a bare 500, and the first
+ * build may long have landed (2026-09-09: the `batches` claim succeeded at
+ * 06:08 and was written off at 08:24 after 24 such refusals).
  *
  * NIGHTGATE_BATCH_MAX > 1 bundles consecutive plain attests on one vault into
  * ONE transaction (one fee; a batch cannot collide with itself). A batch the
@@ -49,17 +55,39 @@ const cfg = ng.config();
 const today = () => new Date().toISOString().slice(0, 10);
 
 async function sponsorWithRetry(unboundTxB64, key) {
+  let all500 = true;
   for (let t = 1; ; t++) {
     try {
       return await ng.sponsorUnbound(unboundTxB64, key, cfg);
     } catch (e) {
+      all500 = all500 && e.status === 500;
       const transient = (e.status >= 500 || /fetch failed|ETIMEDOUT|ECONNRESET|timeout/i.test(e.message)) && t < 3;
       log(`sponsor submit failed (try ${t}): HTTP ${e.status || "?"} ${e.code || ""} ${e.message}`);
-      if (!transient) throw e;
+      if (!transient) {
+        // three plain 500s in a row while the API answers: most likely the
+        // idempotency key was consumed by a DIFFERENT build of this item (an
+        // older worker) - the API's message is opaque ("Internal Server Error")
+        if (all500 && t >= 3) e.sponsorRejected = true;
+        throw e;
+      }
       await new Promise((r) => setTimeout(r, 10_000));
     }
   }
 }
+
+/**
+ * What an item has already done on the way to the chain, kept ON THE QUEUE
+ * ITEM so an outage retry (this process or the next worker) resumes it
+ * instead of building again: { key, attempt, unboundTxB64, attesterId,
+ * builtAt, jobId?, sessionId?, submittedAt?, salt? }. A rebuilt transaction
+ * is a different payload under the same idempotency key - NIGHTGATE answers
+ * 500 for that, and the first build may well have landed (2026-09-09).
+ */
+function saveInflight(itemId, inflight) {
+  ng.writeQueue(ng.readQueue().map((q) => (q.id === itemId ? { ...q, inflight } : q)));
+}
+
+const idempotencyKey = (idKey, attempt, salt) => `${idKey}-${attempt}${salt ? `-${salt}` : ""}`;
 
 const ATTEST_CALLS = new Set(["attest", "anchorContentRoot", "attestReveal"]);
 const FINAL = new Set(["succeeded", "failed"]);
@@ -237,11 +265,32 @@ function recordSkipped(item, reason) {
  */
 async function submitWithRebuild(items, build, idKey) {
   let outcome = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    // never build against a state that lacks the previous transaction
-    await ng.awaitVisible(lastLanded, cfg);
-    const { unboundTxB64, attesterId } = await build();
-    const sub = await sponsorWithRetry(unboundTxB64, `${idKey}-${attempt}`);
+  const head = items[0];
+  // resume what an earlier pass of this item already did (outage retry)
+  let inflight = head.inflight && head.inflight.key === idKey ? head.inflight : null;
+  for (let attempt = inflight?.attempt || 1; attempt <= 2; attempt++) {
+    let unboundTxB64, attesterId, sub;
+    // a job id alone is enough to resume (set by hand for a tx that landed while the worker was down)
+    if (inflight && inflight.attempt === attempt && (inflight.unboundTxB64 || inflight.jobId)) {
+      ({ unboundTxB64, attesterId } = inflight);
+      log(`${head.id} ${head.kind}: resuming attempt ${attempt} with the transaction built ${Math.round((Date.now() - inflight.builtAt) / 60_000)} min ago${inflight.jobId ? ` (job ${inflight.jobId})` : ""}`);
+    } else {
+      // never build against a state that lacks the previous transaction
+      await ng.awaitVisible(lastLanded, cfg);
+      ({ unboundTxB64, attesterId } = await build());
+      inflight = { key: idKey, attempt, unboundTxB64, attesterId, builtAt: Date.now() };
+      saveInflight(head.id, inflight);
+    }
+    if (inflight.jobId) {
+      sub = { jobId: inflight.jobId, sessionId: inflight.sessionId };
+    } else {
+      // same bytes, same key: a submission the API already accepted (but whose
+      // answer we missed) is deduplicated, not rejected
+      sub = await sponsorWithRetry(unboundTxB64, idempotencyKey(idKey, attempt, inflight.salt));
+      if (sub.deduplicated) log(`${head.id} ${head.kind}: NIGHTGATE already had this transaction (job ${sub.jobId}, ${sub.status}) - following it`);
+      inflight = { ...inflight, jobId: sub.jobId, sessionId: sub.sessionId, submittedAt: Date.now() };
+      saveInflight(head.id, inflight);
+    }
     let job = await ng.waitForJob(sub.jobId, sub.sessionId, { cfg });
     if (!FINAL.has(job.status)) {
       // a job stuck in queued/running is the API being slow or down, not a
@@ -260,6 +309,7 @@ async function submitWithRebuild(items, build, idKey) {
       // the refused tx sits in a block: wait for it before reading state again
       noteLanded(job, items[0], false);
       log(`${items[0].id} ${items[0].kind}: rebuilding against fresh state`);
+      inflight = null; // attempt 2 is a genuinely new transaction (own key)
       continue;
     }
     break;
@@ -393,18 +443,30 @@ export async function drain() {
         // cfg.outageRetries times (2026-09-07: two anchors lost to a 502;
         // 2026-09-08: eight lost to "aborted due to timeout" with no retry at all)
         const retries = item.retries || 0;
+        // what this pass left on the item (built tx, job id) - the retry resumes from there
+        const inflight = ng.readQueue().find((q) => q.id === item.id)?.inflight || null;
         if (outage && retries < cfg.outageRetries) {
           const waitMs = OUTAGE_BACKOFF_MS[Math.min(retries, OUTAGE_BACKOFF_MS.length - 1)];
-          log(`${item.id} ${item.kind}: NIGHTGATE unreachable (${e.message.slice(0, 80)}) - retry ${retries + 1}/${cfg.outageRetries} in ${Math.round(waitMs / 1000)}s`);
-          ng.writeQueue(ng.readQueue().map((q) => (q.id === item.id ? { ...q, retries: retries + 1, retried: true, lastError: e.message.slice(0, 120) } : q)));
+          let next = inflight;
+          if (e.sponsorRejected && inflight && !inflight.jobId) {
+            // the API is up but refuses this key with a bare 500, twice in a
+            // row: the key was spent on another build of this item (a worker
+            // from before in-flight state existed). New key, same bytes.
+            const rejected = (inflight.rejected || 0) + 1;
+            next = rejected >= 2 ? { ...inflight, rejected: 0, salt: (inflight.salt || 0) + 1 } : { ...inflight, rejected };
+            if (next.salt !== inflight.salt) log(`${item.id} ${item.kind}: idempotency key refused ${rejected}x - resubmitting the same transaction under key suffix -${next.salt}`);
+          }
+          log(`${item.id} ${item.kind}: NIGHTGATE unreachable (${e.message.slice(0, 80)}) - retry ${retries + 1}/${cfg.outageRetries} in ${Math.round(waitMs / 1000)}s${next?.jobId ? `, then following job ${next.jobId}` : next?.unboundTxB64 ? ", then resubmitting the built transaction" : ""}`);
+          ng.writeQueue(ng.readQueue().map((q) => (q.id === item.id ? { ...q, retries: retries + 1, retried: true, lastError: e.message.slice(0, 120), ...(next ? { inflight: next } : {}) } : q)));
           ng.touchLock();
           await idle(waitMs);
           continue;
         }
         noteFailed(item);
         log(`${item.id} ${item.kind}: error${outage ? ` after ${retries} outage retries` : ""} - ${e.message}`);
-        // doc + metadataHash stay on the entry: `life.mjs anchors retry` re-anchors it from here
-        ng.record({ ok: false, ...baseEntry(item), status: "failed", error: e.message.slice(0, 300), ...(outage ? { apiOutage: true, retries } : {}) });
+        // doc + metadataHash stay on the entry: `life.mjs anchors retry` re-anchors it from here;
+        // the job id lets `life.mjs anchors landed <at> <jobId>` repair an entry whose tx made it after all
+        ng.record({ ok: false, ...baseEntry(item), status: "failed", error: e.message.slice(0, 300), ...(outage ? { apiOutage: true, retries } : {}), ...(inflight?.jobId ? { jobId: inflight.jobId } : {}) });
         try { journal.note("attest", { kind: item.kind, call: item.call, ok: false, payloadHash: item.params?.payloadHash, network: cfg.network, error: e.message.slice(0, 200), ...(outage ? { apiOutage: true } : {}) }); } catch { /* ignore */ }
         done = [item];
       }
