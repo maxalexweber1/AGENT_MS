@@ -190,6 +190,14 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
       job = await callAction("getJobStatus", { jobId, sessionId }, cfg);
       lastErr = null;
       if (job.status === "succeeded" || job.status === "failed") return job;
+      // NIGHTGATE (0.23+) parks a post-broadcast failure - submit watch timed
+      // out, socket dropped - as `reconciliation_required` with the tx hash:
+      // the outcome is ambiguous and ONLY chain evidence moves it on. A
+      // broadcast that never reaches a block stays there forever (the
+      // confirmer's "not indexed -> stays"; 2026-09-10: the daily report sat
+      // there 3 h and the worker treated it as an outage). Settled for us: the
+      // worker probes the indexer itself and rebuilds when nothing shows up.
+      if (job.status === "reconciliation_required" && job.txHash) return job;
     } catch (e) {
       if (!isApiOutage(e.message)) throw e;
       lastErr = e;
@@ -798,19 +806,55 @@ export function clearStaleLock(maxAgeMs = 3 * 60_000) {
   } catch { /* no lock */ }
 }
 
+// ---------- worker log ----------
+
+/**
+ * Where the detached children (anchor worker, daily proof run) write their
+ * console output. Until 2026-09-10 it went to /dev/null: a worker that sat
+ * three hours on one item left no trace anywhere, and the only way to see
+ * what it was doing was asking NIGHTGATE for the job by hand.
+ */
+export const workerLogFile = path.join(dataDir, "anchor-worker.log");
+const WORKER_LOG_ROTATE_BYTES = 2 * 1024 * 1024;
+
+/** An fd for the worker log (append); rotates to `.1` once past 2 MB. Falls back to "ignore". */
+function workerLogStdio() {
+  try {
+    try {
+      if (fs.statSync(workerLogFile).size > WORKER_LOG_ROTATE_BYTES) fs.renameSync(workerLogFile, `${workerLogFile}.1`);
+    } catch { /* no log yet */ }
+    const fd = fs.openSync(workerLogFile, "a");
+    return { stdio: ["ignore", fd, fd], fd };
+  } catch (e) {
+    log("anchor worker log unavailable, output is dropped:", e.message);
+    return { stdio: "ignore", fd: null };
+  }
+}
+
+/** The last `n` lines of the worker log (empty when there is none). */
+export function workerLogTail(n = 20) {
+  try {
+    const lines = fs.readFileSync(workerLogFile, "utf8").split(/\r?\n/).filter(Boolean);
+    return lines.slice(-n);
+  } catch { return []; }
+}
+
 /** Start the anchor worker (detached) unless one is already draining. */
 export function kickWorker() {
   const cfg = config();
   if (!cfg.enabled || workerActive() || !readQueue().length) return false;
   if (paused()) return false;
+  const out = workerLogStdio();
   try {
     const child = spawn(process.execPath, [path.join(scriptsDir, "anchor-worker.mjs")], {
-      detached: true, stdio: "ignore", windowsHide: true,
+      detached: true, stdio: out.stdio, windowsHide: true,
     });
+    if (out.fd !== null) fs.closeSync(out.fd); // the child holds its own copy
     child.unref();
     log(`nightgate: anchor worker started (pid ${child.pid}, ${readQueue().length} queued)`);
     return true;
   } catch (e) {
+    if (out.fd !== null) { try { fs.closeSync(out.fd); } catch { /* ignore */ } }
     log("anchor worker spawn failed:", e.message);
     return false;
   }
@@ -827,14 +871,17 @@ export function kickWorker() {
 export function attestReportAsync(file) {
   const cfg = config();
   if (!cfg.enabled) return false;
+  const out = workerLogStdio();
   try {
     const child = spawn(process.execPath, [path.join(scriptsDir, "attest-report.mjs"), file], {
-      detached: true, stdio: "ignore", windowsHide: true,
+      detached: true, stdio: out.stdio, windowsHide: true,
     });
+    if (out.fd !== null) fs.closeSync(out.fd);
     child.unref();
     log(`nightgate: anchoring ${path.basename(file)} on ${cfg.network} (child pid ${child.pid})`);
     return true;
   } catch (e) {
+    if (out.fd !== null) { try { fs.closeSync(out.fd); } catch { /* ignore */ } }
     log("nightgate spawn failed:", e.message);
     return false;
   }

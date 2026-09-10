@@ -15,7 +15,8 @@
  *   node scripts/life.mjs prove-diff [k] [dateA dateB]           # ZK claim: >=k fields differ between two anchored reports
  *   node scripts/life.mjs anchors pause [min] [reason]           # no on-chain transactions for <min> (default 30): queue waits, worker stops after its current tx
  *   node scripts/life.mjs anchors resume                          # end the pause, drain what queued up
- *   node scripts/life.mjs anchors status                          # pause state, queue length, worker, lifetime counters
+ *   node scripts/life.mjs anchors status                          # pause state, queue length, worker, lifetime counters, last worker-log lines
+ *   node scripts/life.mjs anchors log [n]                         # last n lines (40) of data/anchor-worker.log - what the detached worker is doing
  *   node scripts/life.mjs anchors failed [--since=<days>]         # what failed (API outage etc.) and what can be re-anchored
  *   node scripts/life.mjs anchors retry [--dry-run] [--since=<days>] [--no-verify]   # queue re-anchors for everything that failed + today's daily proof set
  *   node scripts/life.mjs anchors landed <entry.at> <jobId>       # a written-off entry whose NIGHTGATE job did succeed: record it as the success it was
@@ -569,6 +570,10 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
         const sinceMs = days ? Date.now() - Number(days.split("=")[1]) * 86400_000 : 0;
         if (sub === "failed" || flags.includes("--dry-run")) console.log(reanchor.describe(reanchor.plan({ sinceMs })));
         else await reanchor.run({ sinceMs, verify: !flags.includes("--no-verify") });
+      } else if (sub === "log") {
+        // what the detached worker / daily proof run wrote (was /dev/null until 2026-09-10)
+        const lines = nightgate.workerLogTail(Number(n) || 40);
+        console.log(lines.length ? lines.join("\n") : `no worker log yet (${nightgate.workerLogFile})`);
       } else if (sub === "landed") {
         // a written-off entry whose NIGHTGATE job did succeed: record the success it was
         const jobId = rest[0];
@@ -583,6 +588,8 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
         console.log(`anchoring: ${until ? `PAUSED until ${new Date(until).toISOString()}` : "active"}`);
         console.log(`queue: ${nightgate.readQueue().length} item(s), worker ${nightgate.workerActive() ? "running" : "idle"}`);
         console.log(`lifetime: ${st.ok} ok, ${st.failed} failed (${st.feeWasted || 0} refused on chain with the fee burned, ${st.apiOutage || 0} lost to API outages, ${st.reanchored || 0} re-anchored later)`);
+        const tail = nightgate.workerLogTail(3);
+        if (tail.length) console.log(`worker log (${nightgate.workerLogFile}, last ${tail.length}):\n  ${tail.join("\n  ")}`);
       }
     })()
   : cmd === "dashboard" ? (async () => {

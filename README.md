@@ -150,6 +150,7 @@ node scripts/life.mjs prove crystal min 100000   # on-demand ZK claim
 node scripts/life.mjs prove-diff 1              # ">=1 field changed since yesterday"
 node scripts/life.mjs anchors pause 30          # no on-chain transactions for 30 min (queue waits)
 node scripts/life.mjs anchors resume            # drain what queued up meanwhile
+node scripts/life.mjs anchors log               # last lines of data/anchor-worker.log (the detached worker's output)
 node scripts/life.mjs anchors failed            # what failed while NIGHTGATE was down, what can be re-anchored
 node scripts/life.mjs anchors retry --dry-run   # queue re-anchors (drop --dry-run to do it)
 node scripts/life.mjs anchors landed <at> <jobId>   # a written-off entry whose NIGHTGATE job did succeed: record it

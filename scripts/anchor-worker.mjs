@@ -21,6 +21,20 @@
  * only trip the builder's pre-check with "no content root"); `life.mjs attest`
  * re-queues the whole set once the chain is healthy again.
  *
+ * Since NIGHTGATE 0.23 the same situation reads `reconciliation_required`
+ * (broadcast, outcome ambiguous, the job carries the tx hash): NIGHTGATE never
+ * re-broadcasts and never fails such a job by itself - a tx that is not
+ * included stays parked for good (2026-09-10: the daily report sat there 3 h,
+ * the worker took it for an outage and the queue behind it waited). The worker
+ * treats it as settled: same indexer probe, and when nothing shows up it
+ * rebuilds ONCE under a new idempotency key (nothing landed, no fee was
+ * spent, the vault state is unchanged; the entry carries `droppedBroadcast`).
+ * NIGHTGATE 0.23.3 ends such a job itself (`failed / BROADCAST_NOT_INCLUDED`
+ * once the tx ttl has passed); the worker rebuilds on that verdict too. Both
+ * paths are a safeguard for the next unknown or slow state, not a workaround.
+ *
+ * Both detached children log to data/anchor-worker.log (`life.mjs anchors log`).
+ *
  * NIGHTGATE itself being down (5xx, "aborted due to timeout", connection
  * errors, a job stuck in queued/running) is not the item's fault: the item
  * stays at the head of the queue and is retried with backoff (1 min .. 30 min,
@@ -90,7 +104,11 @@ function saveInflight(itemId, inflight) {
 const idempotencyKey = (idKey, attempt, salt) => `${idKey}-${attempt}${salt ? `-${salt}` : ""}`;
 
 const ATTEST_CALLS = new Set(["attest", "anchorContentRoot", "attestReveal"]);
-const FINAL = new Set(["succeeded", "failed"]);
+// job states NIGHTGATE will not move on by itself. `reconciliation_required`
+// (0.23+) = broadcast, outcome ambiguous: only chain evidence resolves it, and
+// a broadcast that never reaches a block stays there for good - so the worker
+// looks at the chain itself (awaitLateLanding) and rebuilds when nothing shows
+const FINAL = new Set(["succeeded", "failed", "reconciliation_required"]);
 // wait before retry n (1-based) when NIGHTGATE is unreachable; the last value repeats
 const OUTAGE_BACKOFF_MS = [60_000, 120_000, 300_000, 600_000, 900_000, 1_800_000];
 
@@ -108,28 +126,40 @@ const PAYLOAD_CALLS = new Set(["attest", "attestReveal"]);
 // calls that only make sense once the payload (and its content root) is on chain
 const DEPENDENT_CALLS = new Set(["anchorContentRoot", "proveFieldPredicate", "proveFieldEquality", "proveFieldMembership", "proveFieldsDiffer", "proveDocumentComparison"]);
 
-/** The sponsor gave up watching the broadcast - the tx may still land. */
+/** The sponsor gave up watching the broadcast (pre-0.23 shape: a plain `failed`) - the tx may still land. */
 const isSubmitTimeout = (job) =>
-  job?.status === "failed" && !!job.txHash && job.errorCode !== "CHAIN_EXECUTION_FAILED" &&
+  job?.status === "failed" && !!job.txHash && job.errorCode !== "CHAIN_EXECUTION_FAILED" && job.errorCode !== "BROADCAST_NOT_INCLUDED" &&
   /timed out|without a Finalized/i.test(job.errorMessage || "");
+
+/**
+ * NIGHTGATE parked the job after broadcasting: "verify chain state before
+ * retrying". It never re-broadcasts and never fails the job by itself
+ * (2026-09-10 08:01: the daily report's tx was never included; the job read
+ * reconciliation_required for 3 h and the worker waited on it as an outage).
+ */
+const isAmbiguous = (job) => job?.status === "reconciliation_required" && !!job.txHash;
+
+/** NIGHTGATE 0.23.3+ proved the absence itself (tx ttl passed, indexer has no record): nothing landed, no fee spent. */
+const isDropped = (job) => job?.status === "failed" && job.errorCode === "BROADCAST_NOT_INCLUDED";
 
 /**
  * Keep asking the indexer whether a broadcast tx made it after the sponsor's
  * watch gave up. Returns the job as "succeeded" (lateLanded) when it did and
  * the payload shows up, a synthetic CHAIN_EXECUTION_FAILED when it landed but
- * the call was refused, or the original failed job when it never appeared.
+ * the call was refused, or the original job when it never appeared.
  */
 async function awaitLateLanding(item, job, { everyMs = 5_000 } = {}) {
   if (!cfg.lateLandWaitMs) return job;
   const t0 = Date.now();
   const vault = item.vault || cfg.vault;
-  log(`${item.id} ${item.kind}: sponsor watch timed out for tx ${ng.shortHash(job.txHash)} - probing the indexer for up to ${Math.round(cfg.lateLandWaitMs / 1000)}s`);
+  const why = isAmbiguous(job) ? `NIGHTGATE parked job ${job.jobId} as ${job.status}` : "sponsor watch timed out";
+  log(`${item.id} ${item.kind}: ${why} for tx ${ng.shortHash(job.txHash)} - probing the indexer for up to ${Math.round(cfg.lateLandWaitMs / 1000)}s`);
   while (Date.now() - t0 < cfg.lateLandWaitMs) {
     const p = await ng.probeTx(job.txHash, cfg).catch(() => null);
     if (p) {
       if (p.applied === false) {
         log(`${item.id} ${item.kind}: tx ${ng.shortHash(job.txHash)} landed late but the call was refused`);
-        return { ...job, errorCode: "CHAIN_EXECUTION_FAILED", errorMessage: `landed late, call refused (${p.status || "?"}); ${job.errorMessage || ""}`.slice(0, 300) };
+        return { ...job, status: "failed", errorCode: "CHAIN_EXECUTION_FAILED", errorMessage: `landed late, call refused (${p.status || "?"}); ${job.errorMessage || ""}`.slice(0, 300) };
       }
       let attested = true;
       if (PAYLOAD_CALLS.has(item.call) && item.params.payloadHash) {
@@ -224,6 +254,8 @@ async function recordOutcome(item, job, attesterId, attempt, extra = {}) {
     txExplorerHash: extra.txExplorerHash !== undefined ? extra.txExplorerHash : (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null),
     jobId: job.jobId,
     ...(attempt > 1 ? { attempt, rebuilt: true } : {}),
+    // attempt 1 was broadcast but never included (NIGHTGATE parked it); no fee was spent
+    ...(extra.dropped ? { droppedBroadcast: extra.dropped } : {}),
     ...(job.lateLanded ? { lateLanded: true } : {}),
     // predicates/diffs leave no payload attestation - verified only applies to attest-family calls
     ...(ATTEST_CALLS.has(item.call) ? { verified } : {}),
@@ -236,7 +268,7 @@ async function recordOutcome(item, job, attesterId, attempt, extra = {}) {
     ...(attempt > 1 ? { attempt } : {}),
     ...(entry.error ? { error: entry.error } : {}),
   });
-  if (entry.ok) log(`${item.id} ${item.kind}/${item.call}: anchored, tx ${entry.txHash}${ATTEST_CALLS.has(item.call) ? `, verified=${verified}` : ""}${attempt > 1 ? " (after rebuild)" : ""}${job.lateLanded ? " (landed after the sponsor watch gave up)" : ""}`);
+  if (entry.ok) log(`${item.id} ${item.kind}/${item.call}: anchored, tx ${entry.txHash}${ATTEST_CALLS.has(item.call) ? `, verified=${verified}` : ""}${attempt > 1 ? (extra.dropped ? ` (rebuilt after broadcast ${ng.shortHash(extra.dropped.txHash)} never landed)` : " (after rebuild)") : ""}${job.lateLanded ? " (landed after the sponsor watch gave up)" : ""}`);
   else log(`${item.id} ${item.kind}/${item.call}: FAILED ${entry.error || job.status}`);
   return entry;
 }
@@ -265,6 +297,7 @@ function recordSkipped(item, reason) {
  */
 async function submitWithRebuild(items, build, idKey) {
   let outcome = null;
+  let dropped = null; // attempt 1 broadcast that never reached a block (rebuilt under a new key)
   const head = items[0];
   // resume what an earlier pass of this item already did (outage retry)
   let inflight = head.inflight && head.inflight.key === idKey ? head.inflight : null;
@@ -301,9 +334,26 @@ async function submitWithRebuild(items, build, idKey) {
       job = await ng.waitForJob(sub.jobId, sub.sessionId, { cfg, timeoutMs: cfg.lateLandWaitMs });
       if (!FINAL.has(job.status)) throw new Error(`NIGHTGATE job ${sub.jobId} still ${job.status} after ${Math.round((180_000 + cfg.lateLandWaitMs) / 1000)}s (API slow or down)`);
     }
-    if (isSubmitTimeout(job)) job = await awaitLateLanding(items[0], job);
-    outcome = { job, attesterId, attempt };
+    if (isSubmitTimeout(job) || isAmbiguous(job)) job = await awaitLateLanding(items[0], job);
+    outcome = { job, attesterId, attempt, ...(dropped ? { dropped } : {}) };
     if (job.status === "succeeded") { noteLanded(job, items.at(-1), true); break; }
+    if ((isAmbiguous(job) || isDropped(job)) && attempt === 1) {
+      // the broadcast never reached a block (0.23.3+ says so itself after the
+      // tx ttl; older servers leave the job parked for good): nothing landed, no fee was spent, the vault state is
+      // unchanged - build the same call again under a NEW key (the old key
+      // belongs to a payload NIGHTGATE still holds). A 2nd identical outcome
+      // is recorded as such; the queue must not wait on this any longer.
+      dropped = { txHash: job.txHash, jobId: job.jobId, status: job.status, error: (job.errorMessage || job.errorCode || "").slice(0, 200) };
+      log(`${items[0].id} ${items[0].kind}: tx ${ng.shortHash(job.txHash)} never reached a block (job ${job.jobId} ${isDropped(job) ? "failed BROADCAST_NOT_INCLUDED" : `stays ${job.status}`}) - rebuilding once under a new key`);
+      inflight = null;
+      continue;
+    }
+    if (isAmbiguous(job)) {
+      // attempt 2 ended the same way (or the late-landing probe is off): make the entry say so
+      job = { ...job, status: "failed", errorCode: job.errorCode || "BROADCAST_NOT_INCLUDED", errorMessage: `broadcast ${job.txHash} never reached a block; NIGHTGATE job ${job.jobId} parked as reconciliation_required (${job.errorMessage || ""})`.slice(0, 300) };
+      outcome = { job, attesterId, attempt, ...(dropped ? { dropped } : {}) };
+      break;
+    }
     if (job.status === "failed" && job.errorCode === "CHAIN_EXECUTION_FAILED" && attempt === 1) {
       recordWasted(items[0], job, attesterId, items.length > 1 ? { batchOf: items.length } : {});
       // the refused tx sits in a block: wait for it before reading state again
@@ -338,7 +388,7 @@ async function processItem(item) {
     }
     throw e;
   }
-  return (await recordOutcome(item, outcome.job, outcome.attesterId, outcome.attempt)).ok;
+  return (await recordOutcome(item, outcome.job, outcome.attesterId, outcome.attempt, outcome.dropped ? { dropped: outcome.dropped } : {})).ok;
 }
 
 /**
@@ -360,10 +410,10 @@ async function processBatch(items) {
     if (e.batchRefused) { log(`batch of ${items.length} refused before proving (${e.message.slice(0, 120)}) - anchoring one by one`); return false; }
     throw e;
   }
-  const { job, attesterId, attempt } = outcome;
+  const { job, attesterId, attempt, dropped } = outcome;
   const txExplorerHash = job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null;
   for (const item of items) {
-    const entry = await recordOutcome(item, job, attesterId, attempt, { batchOf: items.length, txExplorerHash });
+    const entry = await recordOutcome(item, job, attesterId, attempt, { batchOf: items.length, txExplorerHash, ...(dropped ? { dropped } : {}) });
     if (!entry.ok) noteFailed(item);
   }
   return true;
