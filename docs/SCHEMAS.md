@@ -51,6 +51,7 @@ stay in sync with it.
 | `tool` | `itemId`, `cost`, `level` | a profession tool bought once its required level was reached (crystal paid, skill level at purchase) |
 | `craft` | `recipeId`, `skill`, `xp`, `batches` | one craft action at a workstation (recipe id, the skill it trains, XP granted for all batches, batches made) |
 | `quest` | `contracts`, `xp`, `gathers` | one contract run across all skills (since 2026-09-07): contracts delivered, XP earned incl. gathering, gathers made; each delivered contract is also anchored as its own `contract` |
+| `hustle` | `place`, `pitches`, `quotes`, `paid`, `minutes` | one notary sales run (since 2026-09-11): the area id M₳X worked, pitches delivered, quotes given (price + claim hash), anchors paid for out of those pitches, minutes spent; each paid anchor is also anchored as its own `notary-paid` |
 
 ### Worked example (`batch`)
 

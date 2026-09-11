@@ -82,13 +82,14 @@ export function openOrders() { expire(); return load().orders.filter((o) => o.st
  *   { mode: "quote", order }                   pay first: order has price, claimSha256, payTo
  *   { mode: "limit" }                          daily cap reached
  */
-export function request({ threadId, claimantId, claimant, claim }) {
+export function request({ threadId, claimantId, claimant, claim, forcePaid = false, pitched = false }) {
   if (!nightgate.config().enabled) return { mode: "off" }; // nothing to sell without a vault
   const st = load();
   expire();
   const text = String(claim || "").slice(0, 400);
   const claimSha256 = nightgate.sha256hex(String(claim || ""));
-  const free = cfg.price <= 0 || (cfg.freeFirst && !st.freeUsed[claimantId]);
+  // the free first anchor is for people who ask; a pitched agent (hustle mode) pays from the first one
+  const free = cfg.price <= 0 || (!forcePaid && cfg.freeFirst && !st.freeUsed[claimantId]);
   if (free) {
     if (anchorsToday() >= cfg.maxPerDay) return { mode: "limit" };
     const r = nightgate.enqueueDoc("notary", { date: today(), ts: Date.now(), claimant: claimant || shortId(claimantId), claimantId, claim: text, claimSha256 });
@@ -104,12 +105,12 @@ export function request({ threadId, claimantId, claimant, claim }) {
   if (!order) {
     order = {
       id: `${Date.now().toString(36)}-${shortId(claimantId)}`, threadId, claimantId, claimant: claimant || shortId(claimantId),
-      claim: text, claimSha256, price: cfg.price, payTo: myId(), createdAt: Date.now(), status: "quoted",
+      claim: text, claimSha256, price: cfg.price, payTo: myId(), createdAt: Date.now(), status: "quoted", pitched: !!pitched,
     };
     st.orders.push(order);
     save();
-    journal.note("notary-order", { claimantId, claimant, free: false, price: cfg.price, claimSha256 });
-    log(`notary: quoted ${cfg.price} crystal to ${order.claimant} for claim ${claimSha256.slice(0, 12)}…`);
+    journal.note("notary-order", { claimantId, claimant, free: false, price: cfg.price, claimSha256, pitched: !!pitched });
+    log(`notary: quoted ${cfg.price} crystal to ${order.claimant} for claim ${claimSha256.slice(0, 12)}…${pitched ? " (pitched)" : ""}`);
   }
   return { mode: "quote", order };
 }
@@ -145,7 +146,7 @@ function markPaid(order, amount, how) {
   st.income.count += 1;
   st.income.byDay[today()] = (st.income.byDay[today()] || 0) + amount;
   save();
-  journal.note("notary-paid", { claimantId: order.claimantId, claimant: order.claimant, amount, via: how, payloadHash: order.payloadHash || null });
+  journal.note("notary-paid", { claimantId: order.claimantId, claimant: order.claimant, amount, via: how, payloadHash: order.payloadHash || null, pitched: !!order.pitched });
   log(`notary: ${order.claimant} paid ${amount} crystal (${how}) - anchoring ${order.payloadHash || "FAILED TO QUEUE"}`);
   return order;
 }

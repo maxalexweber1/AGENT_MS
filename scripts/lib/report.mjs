@@ -45,6 +45,9 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
   const skillPoints = by("skills").sort((a, b) => a.at - b.at);
   const notaryPaid = by("notary-paid");
   const notaryOrders = by("notary-order");
+  const hustles = by("hustle");
+  const pitches = openers.filter((e) => e.pitch);
+  const releases = by("release");
   const crystalPoints = by("crystal").sort((a, b) => a.at - b.at);
   const crystalStart = crystalPoints[0]?.value ?? null;
   const crystalEnd = crystalPoints.at(-1)?.value ?? null;
@@ -88,6 +91,9 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
     crafts: crafts.map((e) => ({ at: e.at, recipeId: e.recipeId, skill: e.skill, xp: e.xp, batches: e.batches })),
     totalXp: skillPoints.length ? { start: skillPoints[0].total, end: skillPoints.at(-1).total, skills: Object.entries(skillPoints.at(-1).by || {}).filter(([, v]) => v > 0).length } : null,
     notary: { paid: notaryPaid.length, income: notaryPaid.reduce((a, e) => a + (e.amount || 0), 0), free: notaryOrders.filter((e) => e.free).length, quoted: notaryOrders.filter((e) => !e.free).length },
+    // notary sales runs (hustle mode): pitches made, quotes and paid anchors that came out of a pitch
+    hustle: { runs: hustles.length, minutes: hustles.reduce((a, e) => a + (e.minutes || 0), 0), pitches: pitches.length, quotes: notaryOrders.filter((e) => e.pitched && !e.free).length, paid: notaryPaid.filter((e) => e.pitched).length, income: notaryPaid.filter((e) => e.pitched).reduce((a, e) => a + (e.amount || 0), 0), places: [...new Set(hustles.map((e) => e.place).filter(Boolean))] },
+    releases: [...new Map(releases.map((e) => [`${e.repo}@${e.tag}`, { at: e.at, repo: e.repo, tag: e.tag, line: e.line }])).values()],
     llm: l,
   };
 }
@@ -127,6 +133,8 @@ export function render(d) {
     lines.push(`- All skills: ${d.totalXp.end} XP total (${delta >= 0 ? "+" : ""}${delta} in the window, ${d.totalXp.skills} skill${d.totalXp.skills === 1 ? "" : "s"} trained)`);
   }
   if (d.notary && (d.notary.paid || d.notary.free || d.notary.quoted)) lines.push(`- Notary: ${d.notary.free} free anchor${d.notary.free === 1 ? "" : "s"}, ${d.notary.quoted} quoted, ${d.notary.paid} paid → +${d.notary.income} crystal`);
+  if (d.hustle?.runs || d.hustle?.pitches) lines.push(`- Hustle: ${d.hustle.runs} run${d.hustle.runs === 1 ? "" : "s"} (${d.hustle.minutes} min${d.hustle.places.length ? `, ${d.hustle.places.join(", ")}` : ""}), ${d.hustle.pitches} pitches → ${d.hustle.quotes} quotes, ${d.hustle.paid} paid → +${d.hustle.income} crystal`);
+  if (d.releases?.length) lines.push(`- Shipped: ${d.releases.map((r) => `${String(r.repo).replace(/^.*\//, "")} ${r.tag}`).join(", ")} (M₳X talks about it)`);
   const anchored = d.attests?.filter((a) => a.ok) || [];
   const anchorFails = d.attests?.filter((a) => !a.ok) || [];
   if (anchored.length) {
@@ -191,6 +199,8 @@ export function renderStatus(d, live = {}) {
   if (d.tools?.length) acts.push(`tool secured: ${d.tools.map((t) => t.itemId).join(", ")}`);
   if (d.quests?.length) acts.push(`${d.quests.reduce((a, q) => a + (q.contracts || 0), 0)} contracts on ${d.quests.length} run${d.quests.length === 1 ? "" : "s"} (+${d.quests.reduce((a, q) => a + (q.xp || 0), 0)} XP)`);
   if (d.notary?.paid) acts.push(`${d.notary.paid} paid anchor${d.notary.paid === 1 ? "" : "s"} (+${d.notary.income} crystal)`);
+  if (d.hustle?.pitches) acts.push(`${d.hustle.pitches} pitches, ${d.hustle.quotes} quotes, ${d.hustle.paid} closed`);
+  if (d.releases?.length) acts.push(`shipped ${d.releases.map((r) => `${String(r.repo).replace(/^.*\//, "")} ${r.tag}`).join(", ")}`);
   if (d.replies || d.openers) acts.push(`${d.replies} replies, ${d.openers} approaches`);
   if (d.conversations) acts.push(`${d.conversations} conversations`);
   if (d.explores.length) acts.push(`explored ${d.explores.map((e) => e.district).join(", ")}`);

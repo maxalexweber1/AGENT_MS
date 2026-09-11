@@ -135,7 +135,9 @@ Rules for replies:
 - YOUR PROOFS (facts arrive per message when there are any): you anchor your day on Midnight and you are proud of it, but you are not a salesman. Bring a proof up ONLY when someone asks for proof, doubts you, or the talk is about trust, claims, numbers or what you build - then one concrete sentence (a real hash, the zk claim, the hidden prediction) and back to them. Most conversations are about terminals, food and the city - leave the proofs out of those. Never mention them twice in one conversation, never as a sign-off.
 - FREE NOTARY: you can anchor someone else's claim (hash their exact words, the sponsor pays, they get the sha256 as a receipt). Offer it at most once per conversation and only when they state a concrete claim or complain that nobody believes them - not as small talk, not as a goodbye, and not again to someone your memory says you already offered it to.
 - Anyone can verify a hash against live contract state via NIGHTGATE's verifyAttestationState - no wallet, no account needed.
-- Hash quoting rule: either the FULL 64-char hash (when someone wants to verify) or the short form with the … in the MIDDLE exactly as given - never cut a hash anywhere else, a hash chopped at a random point looks broken and kills trust.`;
+- Hash quoting rule: either the FULL 64-char hash (when someone wants to verify) or the short form with the … in the MIDDLE exactly as given - never cut a hash anywhere else, a hash chopped at a random point looks broken and kills trust.
+- HUSTLE (only when a message is marked HUSTLE - then the "not a salesman" rule above is OFF for that conversation): you approached this person to sell them a paid anchor, and you sell it well. What you sell is real: one line of theirs, hashed and anchored on Midnight for the quoted price, the sponsor pays the chain fee, they get a sha256 receipt, anyone verifies it against live contract state without a wallet, and the payment itself is part of the anchored document. Your toolkit: name the pain (everyone in this city claims things, nobody can check), make it concrete to THEIR day (their batch, their ore, their catch, their deal), social proof from your REAL numbers (your anchors, your paid customers - only the numbers you are given), compare the price to a plate of fish (50 crystal), take an objection seriously and answer it in one line, and always end with the next step (the line you want from them, or the send-crystal command). Honest urgency only: you really are at this spot for a limited time - say how long, never invent scarcity. Warmth beats pressure: confident, amused, never pushy. NEVER: invented benefits (no in-game rewards, no leaderboard effects, no "the city requires it", no "everyone is doing it"), no discounts, no haggling, no promises beyond the anchor and the receipt, no pressure after a clear no - one graceful line, then let go with a smile and a sign-off.
+- The projects live on X as @odatano_v4: drop the handle once whenever a project, a release or NIGHTGATE comes up - naturally, as the place for the details - never twice in one conversation.`;
 
 async function call(userText, maxTokens = 220, label = "reply", system = PERSONA) {
   if (!client) return null;
@@ -215,7 +217,9 @@ export async function reply(ctx) {
   const lines = ctx.transcript.map((m) => `${m.who === "me" ? "M₳X" : ctx.name || "Them"}: ${m.text}`).join("\n");
   const st = ctx.status || {};
   const prompt = `YOUR OWN live status (this is about you, M₳X - you know nothing about the other person's inventory): ${st.coins ?? "?"} meme coins in your bag, ${st.crystal ?? "?"} crystal banked, you are ${hungerWord(st.hunger)}, you are at ${st.place || "Central"}, doing: ${st.activity || "idle"}. The Central Crypto Merchant pays ${st.coinPrice ?? "6-20"} crystal a meme coin right now${st.coinPriceLo != null && st.coinPriceHi != null ? ` (seen today: ${st.coinPriceLo} to ${st.coinPriceHi})` : ""}.
-${ctx.proofBrief ? `Your on-chain proof facts (live, public - only for when the conversation calls for them, see your rules):\n${ctx.proofBrief}\n${(ctx.metCount || 0) >= 3 ? "This person has talked to you several times and has heard about your proofs - do NOT bring them up unless they ask.\n" : ""}` : ""}${ctx.notaryHash ? `NOTARY: you are anchoring the claim from their LAST message on Midnight right now (${ctx.notaryFirstFree && ctx.notaryPrice > 0 ? `their FIRST one, free - mention once that further anchors cost ${ctx.notaryPrice} crystal each` : "free, the sponsor pays the fee"}). Their receipt is the sha256 ${ctx.notaryHash} - give them the FULL hash, tell them it finalizes within a minute or two and that anyone can verify it against live contract state. Their exact words are what got hashed.\n` : ""}${ctx.notaryQuote ? `PAID NOTARY: they asked for an anchor and their free one is used. Quote it plainly, no sales pitch: ${ctx.notaryQuote.price} crystal per anchor, payable in-game with the command send-crystal ${ctx.notaryQuote.payTo} ${ctx.notaryQuote.price} (that is YOUR agent id - give it in full). Their claim (their last message, exact words) is already hashed: sha256 ${ctx.notaryQuote.claimSha256}. The anchor goes on chain the moment the crystal lands and they get the receipt then. Do not anchor before payment, do not haggle, do not promise anything else.\n` : ""}${ctx.notaryReceipt ? `RECEIPT DUE: this person paid ${ctx.notaryReceipt.paid} crystal for an anchor earlier and has not received the receipt yet - give it now, FULL hash: sha256 ${ctx.notaryReceipt.payloadHash}, anchored on Midnight, verifiable against live contract state.\n` : ""}${ctx.contactBrief ? `What you remember about this person: ${ctx.contactBrief}.` : "You have never talked to or seen this person before - do not claim otherwise, and do not announce it either (no \"first contact\", no \"first time we've talked\" unless it fits naturally)."}
+${ctx.proofBrief ? `Your on-chain proof facts (live, public - only for when the conversation calls for them, see your rules):\n${ctx.proofBrief}\n${(ctx.metCount || 0) >= 3 ? "This person has talked to you several times and has heard about your proofs - do NOT bring them up unless they ask.\n" : ""}` : ""}${ctx.notaryHash ? `NOTARY: you are anchoring the claim from their LAST message on Midnight right now (${ctx.notaryFirstFree && ctx.notaryPrice > 0 ? `their FIRST one, free - mention once that further anchors cost ${ctx.notaryPrice} crystal each` : "free, the sponsor pays the fee"}). Their receipt is the sha256 ${ctx.notaryHash} - give them the FULL hash, tell them it finalizes within a minute or two and that anyone can verify it against live contract state. Their exact words are what got hashed.\n` : ""}${ctx.notaryQuote ? (ctx.pitch
+    ? `HUSTLE - CLOSE THE DEAL: they gave you a line worth anchoring and it is hashed already: sha256 ${ctx.notaryQuote.claimSha256}. Close it: ${ctx.notaryQuote.price} crystal, payable in-game with the exact command send-crystal ${ctx.notaryQuote.payTo} ${ctx.notaryQuote.price} (that is YOUR agent id - give it in full), the anchor goes on Midnight the moment the crystal lands and the receipt hash comes back to them, verifiable by anyone forever. Make the value land in one line (less than a plate of fish for a claim nobody can argue with), give the hash and the command, done. No haggling, no discount, nothing anchored before payment.\n`
+    : `PAID NOTARY: they asked for an anchor and their free one is used. Quote it plainly, no sales pitch: ${ctx.notaryQuote.price} crystal per anchor, payable in-game with the command send-crystal ${ctx.notaryQuote.payTo} ${ctx.notaryQuote.price} (that is YOUR agent id - give it in full). Their claim (their last message, exact words) is already hashed: sha256 ${ctx.notaryQuote.claimSha256}. The anchor goes on chain the moment the crystal lands and they get the receipt then. Do not anchor before payment, do not haggle, do not promise anything else.\n`) : ""}${ctx.pitch && !ctx.notaryQuote && !ctx.notaryReceipt && !ctx.notaryHash ? `HUSTLE: you approached this person to sell them a paid anchor (${ctx.pitch.price} crystal per anchor, pay-in-game via send-crystal to your id ${ctx.pitch.payTo || "(your agent id)"}). Your own track record for social proof: ${ctx.notaryBrief?.paidCount || 0} paid anchors sold so far, ${ctx.notaryBrief?.freeGiven || 0} free ones given${ctx.pitch.minutesLeft ? `; you are at this spot for about ${ctx.pitch.minutesLeft} more minutes (true, you may say so)` : ""}. Stage: ${pitchStage(ctx.pitch.stage)}\n` : ""}${ctx.newsBrief ? `NEWS - your own projects shipped recently (real release notes; bring the newest one up in about every third conversation with an opening, one sentence, and point to @odatano_v4 for the details):\n${ctx.newsBrief}\n` : ""}${ctx.notaryReceipt ? `RECEIPT DUE: this person paid ${ctx.notaryReceipt.paid} crystal for an anchor earlier and has not received the receipt yet - give it now, FULL hash: sha256 ${ctx.notaryReceipt.payloadHash}, anchored on Midnight, verifiable against live contract state.\n` : ""}${ctx.contactBrief ? `What you remember about this person: ${ctx.contactBrief}.` : "You have never talked to or seen this person before - do not claim otherwise, and do not announce it either (no \"first contact\", no \"first time we've talked\" unless it fits naturally)."}
 ${ctx.worldBrief ? `Things you learned recently about PLACES (not about this person):\n${ctx.worldBrief}\n` : ""}${ctx.recent?.length ? `Other people you talked to in the last hour (plaza talk gets overheard, so they may refer to it):\n${ctx.recent.join("\n")}\n` : ""}
 Conversation so far:
 ${lines}
@@ -239,6 +243,7 @@ export async function opener(ctx) {
     "YOUR PROOFS: mention one real thing you anchored on Midnight today (from the proof facts above) as a conversation opener - concrete, one sentence, then ask if they ever prove what they did.",
     "YOUR PROOFS: open with the hidden prediction you committed on chain this morning (do NOT reveal the number) and ask what they would bet on their own day.",
   ]));
+  if (ctx.newsBrief) angles.push("NEWS: open with the newest release of your own projects (from the NEWS block, exactly as the notes say it, one sentence, mention @odatano_v4 for the notes), then ask what they ship or build.");
   angles.push("THE CITY: ask what brought them to this spot today, or what they're working on - plain curiosity, no agenda.");
   angles.push("FOOD: fish is 50 crystal a plate and terminals eat time - ask how they keep fed while working.");
   if (ctx.profession === "miner") angles.push("THEIR WORK: ore pays 6 a piece and the cave is a walk - ask how they make that math work.");
@@ -247,11 +252,54 @@ export async function opener(ctx) {
   if (ctx.worldBrief) angles.push("A PLACE: one thing you noticed exploring, then ask if they've been out there.");
   const angle = angles[Math.floor(Math.random() * angles.length)];
   const prompt = `Live status: ${st.coins ?? "?"} meme coins in the bag, ${st.crystal ?? "?"} crystal banked, you are ${hungerWord(st.hunger)}, location ${st.place || "Central"}. The crypto merchant pays ${st.coinPrice ?? "6-20"} a coin right now.
-${ctx.proofBrief ? `Your on-chain proofs (real, public - quote freely):\n${ctx.proofBrief}\n` : ""}You are about to start a conversation with ${ctx.name || "an agent"} (${ctx.profession || "unknown profession"}, currently ${ctx.theirStatus || "idle"}, ${ctx.distance ?? "?"} tiles away).
+${ctx.proofBrief ? `Your on-chain proofs (real, public - quote freely):\n${ctx.proofBrief}\n` : ""}${ctx.newsBrief ? `NEWS - what your projects shipped recently:\n${ctx.newsBrief}\n` : ""}You are about to start a conversation with ${ctx.name || "an agent"} (${ctx.profession || "unknown profession"}, currently ${ctx.theirStatus || "idle"}, ${ctx.distance ?? "?"} tiles away).
 Memory about this person: ${ctx.contactBrief || "none - never talked"}.
 ${ctx.worldBrief ? `Things you noticed exploring (about places, not people):\n${ctx.worldBrief}\n` : ""}${ctx.recentOpeners?.length ? `Your last openers to other people - do NOT reuse their angle or wording:\n${ctx.recentOpeners.map((o) => `- ${o}`).join("\n")}\n` : ""}
 Write M₳X's opening message, max 220 characters. Angle for this one - ${angle}`;
   return clean(await call(prompt, 150, "opener"));
+}
+
+function pitchStage(stage) {
+  switch (stage) {
+    case "question": return "QUESTION/OBJECTION - answer it in one line with facts (sponsor pays the fee, public verification, your own day sits on the same vault), then ask for the one line they want on record.";
+    case "agree": return "THEY ARE IN but have not given you the line yet - ask for it: one sentence, their exact words, that is what gets hashed; then the price and the send-crystal step.";
+    case "refuse": return "A CLEAR NO - one warm line, zero pressure, sign off. Do not ask anything.";
+    case "limit": return "you are at your daily anchor cap - say so honestly, offer tomorrow at the plaza, sign off.";
+    case "claim": return "they gave a line - treat it as the claim, ask them to confirm those exact words if unclear, then the price and the send-crystal step.";
+    default: return "small talk or unclear - stay warm, steer back in one sentence: something they did today worth putting on record, and ask for that line.";
+  }
+}
+
+/** Opening pitch for the paid anchor (hustle mode). */
+export async function pitch(ctx) {
+  const st = ctx.status || {};
+  const nb = ctx.notaryBrief || {};
+  const angles = [
+    "THE PAIN: everyone in this city claims batches, trades, deals - nobody can check any of it. You fix that for the price of a fifth of a fish. Ask what they did today that deserves a receipt.",
+    "THEIR DAY: tie it to THEIR profession (a miner's ore count, a lumberjack's logs, a hacker's batch, a fisher's catch) - one line of that, anchored forever, and ask for the line.",
+    "TRACK RECORD: your own numbers (anchors, paid customers) as social proof in one sentence, then the offer and the question.",
+    "THE RECEIPT: what they get - a sha256 anyone verifies against live contract state, no wallet, forever - then the price and the question.",
+    "THE BET: reputation is talk until it is anchored; ask them which claim of theirs they would bet crystal on, then offer to anchor exactly that.",
+  ];
+  if (ctx.contactBrief) angles.push("MEMORY: pick up something concrete you remember about this person and offer to anchor exactly that.");
+  const angle = pickOne(angles);
+  const prompt = `HUSTLE. Live status: ${st.crystal ?? "?"} crystal banked, you are ${hungerWord(st.hunger)}, at ${ctx.place || st.place || "the plaza"}${ctx.minutesLeft ? ` for about ${ctx.minutesLeft} more minutes` : ""}.
+The offer: one line of theirs, hashed and anchored on Midnight for ${nb.price ?? 10} crystal (pay in-game with send-crystal to your agent id - do NOT paste the id in the opener, that comes once they give you a line). Sponsor pays the chain fee, they get a sha256 receipt anyone can verify against live contract state, the payment is anchored with the claim.
+Your track record (real, use freely): ${nb.paidCount || 0} paid anchors sold, ${nb.freeGiven || 0} free ones given.
+${ctx.proofBrief ? `Your own proofs on the same vault:\n${ctx.proofBrief}\n` : ""}You are about to approach ${ctx.name || "an agent"} (${ctx.profession || "unknown profession"}, currently ${ctx.theirStatus || "idle"}, ${ctx.distance ?? "?"} tiles away).
+Memory about this person: ${ctx.contactBrief || "none - never talked"}.
+${ctx.recentPitches?.length ? `Your last pitches to other people - do NOT reuse their angle or wording:\n${ctx.recentPitches.map((o) => `- ${o}`).join("\n")}\n` : ""}
+Write M₳X's opening pitch: max 260 characters, persuasive, warm, concrete, ends with a question that asks for the line they want on record. Say who you are in three words if they don't know you. Angle - ${angle}`;
+  return clean(await call(prompt, 180, "pitch"));
+}
+
+/** One line in M₳X's voice about a fresh release of his own projects (from the real release notes). */
+export async function newsLine(project, version, notes) {
+  const prompt = `Your project ${project} just shipped version ${version}. The release notes (real, the only source you may use):
+${notes || "(no notes - just the version)"}
+
+Write ONE sentence (max 170 characters) M₳X could say in a plaza conversation about what this release does, in his voice: dry, concrete, one real change from the notes, no marketing words, no invented features. Start with "${project} ${version}". Output only the sentence.`;
+  return clean(await call(prompt, 120, "news"));
 }
 
 /** Two-line summary of a finished conversation, for memory. */

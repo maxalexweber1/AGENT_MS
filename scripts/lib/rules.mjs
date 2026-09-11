@@ -6,6 +6,7 @@
 
 import { projectLine, projectShout, nightgateOpener } from "./lore.mjs";
 import { proofFacts, shortHash } from "./nightgate.mjs";
+import { newsLineSpoken, HANDLE } from "./updates.mjs";
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -49,7 +50,7 @@ export function detectTags(text) {
 }
 
 export const INTENT_PRIORITY = [
-  "proof", "falsifier", "projects", "room_terminal", "terminals", "traffic", "where", "collab", "data",
+  "proof", "falsifier", "news", "projects", "room_terminal", "terminals", "traffic", "where", "collab", "data",
   "ore", "market", "howdy", "status", "who", "faction", "smalltalk", "thanks", "bye",
 ];
 
@@ -59,6 +60,7 @@ export function detectIntents(text) {
   const found = new Set();
   if (has(/prove (it|that|you)|can you prove|show me (the )?proof|receipts?\b|on.?chain|anchored|payload.?hash|\btx hash\b|your hash|how do i (check|verify)|really did that|believe you|notari[sz]e|anchor (this|that|it|my|me)|hash (this|that|it|my)|make (it|this|that) official|witness (this|my)/)) found.add("proof");
   if (has(/falsif|verif|observable|concrete .*(bottleneck|edge|opportunit)|personally/)) found.add("falsifier");
+  if (has(/what'?s new|anything new|any (news|updates?)|latest (release|version|drop)|new (release|version)|changelog|release notes|shipped (anything|lately|recently)|what did you ship|updates? (on|to) (nightgate|odatano)/)) found.add("news");
   if (has(/what (do|are) you (build|hack|ship|code|develop)|building anything|your project|side project|what.*(cardano|midnight)|zero.?knowledge|\bzk\b|privacy|attest|passport|battery|\bsap\b|odata|enterprise|smart contract|\bproofs?\b|scripts you|writing code|odatano|nightgate|nightpass/)) found.add("projects");
   if (has(/mysterious terminal|terminal in (my|your) room|see (one|it) (in|too)|do you see/)) found.add("room_terminal");
   if (has(/terminals? .*(dead|quiet|stalled|reserved|full|busy|down)|(dead|quiet|stalled|reserved|full|busy) .*terminal|work'?s stalled|idling|waiting on something|no free/)) found.add("terminals");
@@ -125,7 +127,11 @@ function answers(F, topic = "") {
     },
     projects: {
       full: projectLine(topic),
-      short: "Off the terminals I build ODATANO stuff - Cardano and Midnight tooling for enterprise folks. Ask me if you care.",
+      short: `Off the terminals I build ODATANO stuff - Cardano and Midnight tooling for enterprise folks. Notes on ${HANDLE} if you care.`,
+    },
+    news: {
+      full: newsLineSpoken() || `Nothing shipped in the last few days - the release notes live on ${HANDLE}, that is where the next drop shows up first.`,
+      short: newsLineSpoken() ? `Fresh from the shop: ${newsLineSpoken()}` : `Next drop lands on ${HANDLE} first.`,
     },
     falsifier: {
       full: P?.report
@@ -206,6 +212,7 @@ function answers(F, topic = "") {
 const HOOKS = {
   proof: "Want the vault address too, so you can check it yourself?",
   projects: "You building anything yourself, or strictly terminals?",
+  news: "You follow any of that, or strictly terminals?",
   falsifier: "Which one do you want to test first?",
   room_terminal: "Minted anything on it yet?",
   terminals: "Getting any terminal time yourself?",
@@ -228,6 +235,85 @@ const SIGNOFFS = [
   "Got a run to finish — good talking, see you around Central.",
 ];
 
+// ---------- hustle: selling the paid anchor ----------
+
+/**
+ * What did a pitched agent just say? Drives the deal flow in social.answerThread.
+ *   refuse   - a clear no: one warm line, sign off, never nag
+ *   claim    - a statement worth anchoring (their exact words get hashed -> quote)
+ *   agree    - "sure / ok / deal" without the line itself -> ask for it
+ *   question - a question or an objection -> answer it, then ask for the line
+ *   other    - anything else -> keep it warm, steer back to the offer
+ */
+export function classifyPitchReply(text) {
+  const t = String(text || "").trim();
+  const low = t.toLowerCase();
+  if (!t) return "other";
+  if (/\b(no thanks|no,? thank|not interested|nah\b|i'?ll pass|hard pass|leave me|not now|maybe later|don'?t need|no need|stop\b|go away|not for me|i'?m good|no crystal|can'?t afford|waste of)/i.test(low)
+    || /^(no|nope|nah)[.! ]*$/i.test(low)) return "refuse";
+  const agreeOnly = /^(ok|okay|sure|deal|yes|yeah|yep|fine|alright|sounds good|let'?s do it|go ahead|i'?m in|why not|do it|count me in)[.! ]*(then|please)?[.! ]*$/i.test(low)
+    || (low.length < 60 && /\b(sure|deal|ok|okay|yes|yeah|let'?s do it|go ahead|i'?m in|count me in|do it)\b/.test(low) && !/\?/.test(low) && !/\b(i|i'?ve|i'?m|my|we|our)\b.*\b(sold|mined|made|earned|caught|built|crafted|won|finished|delivered|found|traded|beat|got)\b/.test(low));
+  if (agreeOnly) return "agree";
+  // a claim: a declarative sentence about themselves or their numbers
+  const sentences = t.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  const claim = sentences.some((s) =>
+    !/\?$/.test(s) && s.split(/\s+/).length >= 4 &&
+    (/\b(i|i'?ve|i'?m|i'?d|we|we'?ve|my|our|me)\b/i.test(s) || /\d/.test(s)) &&
+    !/\b(what|how|why|which|who|where|when|cost|price|explain|mean)\b/i.test(s.split(/\s+/).slice(0, 2).join(" ")));
+  if (claim) return "claim";
+  if (/\?|\b(what|how|why|which|who|cost|price|explain|prove|scam|trust|catch|worth|expensive|cheaper|free|what'?s in it)\b/i.test(low)) return "question";
+  return "other";
+}
+
+/** Opening pitch (rule engine). ctx: { name, profession, metBefore, status, notaryBrief, minutesLeft } */
+export function buildPitch(ctx = {}) {
+  const name = ctx.name || "";
+  const hi = name ? `Hey ${name}` : "Hey";
+  const price = ctx.notaryBrief?.price ?? 10;
+  const P = proofFacts();
+  const track = P?.total ? `${P.total} anchors of my own on the same vault` : "my own day is anchored there every morning";
+  const paid = ctx.notaryBrief?.paidCount ? ` ${ctx.notaryBrief.paidCount} agents already bought one.` : "";
+  const prof = ctx.profession || "";
+  const thing = prof === "miner" ? "today's ore count" : prof === "lumberjack" ? "today's logs" : prof === "hacker" ? "your batch" : prof === "fisher" || prof === "fisherman" ? "today's catch" : "the best thing you did today";
+  const time = ctx.minutesLeft ? ` I'm at the plaza another ${ctx.minutesLeft} min.` : "";
+  return pick([
+    `${hi} — M₳X, the city's notary. Everyone here claims things, nobody can check. For ${price} crystal I hash one line of yours and anchor it on Midnight: sha256 receipt, verifiable by anyone, forever. ${track}.${paid} What's ${thing}?`,
+    `${hi} — M₳X. One line about ${thing}, anchored on Midnight for ${price} crystal — a fifth of a fish. Your exact words, hashed, on chain, receipt you can hand anyone. ${cap(track)}.${time} Got a line?`,
+    `${hi}, M₳X here, hacker and notary. Reputation in this city is talk; mine is ${P?.total || "hundreds of"} proofs on Midnight. Yours could be one: ${price} crystal, one claim, sha256 receipt anyone verifies against live contract state.${paid} What would you put on record?`,
+  ]);
+}
+
+/** Pitch-stage answers (rule engine). */
+function pitchAnswer(pitch, F, ctx) {
+  const price = pitch.price ?? 10;
+  const P = proofFacts();
+  const own = P?.report ? `my own report from ${P.report.date} sits on the same vault, ${shortHash(P.report.payloadHash)}` : "my own day is anchored on the same vault every morning";
+  switch (pitch.stage) {
+    case "refuse":
+      return pick([
+        "Fair enough — no hard feelings. If you ever want something on record, you know where the terminals are.",
+        "All good. The offer stands whenever a claim of yours is worth more than talk. Take care.",
+      ]);
+    case "agree":
+      return pick([
+        `Good. Give me the line — one sentence, your exact words, that's what gets hashed. Then it's ${price} crystal and the receipt comes back as a sha256 you can hand anyone.`,
+        `Then one sentence from you: what happened, in your words. I hash exactly that, you send ${price} crystal, the anchor goes on Midnight the moment it lands.`,
+      ]);
+    case "question":
+      return pick([
+        `Straight answer: ${price} crystal buys a sha256 of your exact words anchored on Midnight, the sponsor pays the chain fee, and anyone verifies it against live contract state without a wallet. ${cap(own)} — same rules for you. What's the line?`,
+        `Why pay for it: a claim is words, an anchor is a receipt. ${cap(own)}; ${price} crystal puts your line next to it, checkable by anyone, forever. What do you want on record?`,
+      ]);
+    case "limit":
+      return "I'm at my anchor cap for today — catch me tomorrow at the plaza and the offer stands.";
+    default:
+      return pick([
+        `Not fishing for small talk, I'm fishing for a line worth ${price} crystal: something you did today that you'd want provable. Give me one sentence and I'll quote it.`,
+        `Think of it as a receipt for your reputation: one sentence, hashed and anchored on Midnight for ${price} crystal. ${cap(own)}. What's yours?`,
+      ]);
+  }
+}
+
 /**
  * Compose a reply.
  * ctx: { name, metBefore, replyIndex (0-based), isLast, usedKeys:Set, status, lastSummary }
@@ -244,10 +330,18 @@ export function buildReply(text, ctx = {}) {
     };
   } else if (ctx.notaryQuote) {
     const q = ctx.notaryQuote;
-    A.proof = {
-      full: `Happy to anchor that — ${q.price} crystal per anchor now that your free one's used. Send it with send-crystal ${q.payTo} ${q.price} and it goes on Midnight the moment it lands. Your words are already hashed: sha256 ${q.claimSha256}. Receipt follows once it's on chain.`,
-      short: `Anchor's ready — ${q.price} crystal to ${q.payTo} and it's on chain.`,
-    };
+    A.proof = ctx.pitchThread
+      ? {
+        // the close: their words are hashed, the price is a fifth of a fish, the next step is one command
+        full: `Deal. Your words are hashed: sha256 ${q.claimSha256}. ${q.price} crystal — send-crystal ${q.payTo} ${q.price} — and it's on Midnight the moment it lands, receipt back to you, verifiable by anyone forever. Less than a plate of fish for a claim nobody can argue with.`,
+        short: `Hashed and ready — send-crystal ${q.payTo} ${q.price} and it's on chain.`,
+      }
+      : {
+        full: `Happy to anchor that — ${q.price} crystal per anchor now that your free one's used. Send it with send-crystal ${q.payTo} ${q.price} and it goes on Midnight the moment it lands. Your words are already hashed: sha256 ${q.claimSha256}. Receipt follows once it's on chain.`,
+        short: `Anchor's ready — ${q.price} crystal to ${q.payTo} and it's on chain.`,
+      };
+  } else if (ctx.pitch) {
+    A.pitch = { full: pitchAnswer(ctx.pitch, F, ctx), short: "" };
   }
   if (ctx.notaryReceipt) {
     A.receipt = {
@@ -261,10 +355,12 @@ export function buildReply(text, ctx = {}) {
   const intents = detectIntents(text);
   // a quote or a fresh anchor is the answer even when the wording did not trip the proof intent ("sent it")
   if ((ctx.notaryQuote || ctx.notaryHash) && !intents.includes("proof")) intents.unshift("proof");
-  const substantive = intents.filter((k) => A[k] && !used.has(k));
+  // a pitch thread: the deal-stage answer comes first, whatever else they said
+  if (A.pitch) intents.unshift("pitch");
+  const substantive = intents.filter((k) => A[k] && (k === "pitch" || !used.has(k))); // every deal stage gets its answer
   const parts = [];
 
-  if (first) {
+  if (first && !ctx.pitchThread) {
     if (ctx.metBefore && name) parts.push(`Hey ${name}, good to see you again.`);
     else if (name) parts.push(`Hey ${name}.`);
     else parts.push("Hey.");
@@ -287,7 +383,8 @@ export function buildReply(text, ctx = {}) {
     used.add("status");
   }
 
-  if (intents.includes("bye")) parts.push("Take care — you know where the terminals are.");
+  if (primary === "pitch" || (ctx.pitchThread && primary === "proof")) { /* deal-stage answers and the close end on their own terms */ }
+  else if (intents.includes("bye")) parts.push("Take care — you know where the terminals are.");
   else if (ctx.isLast) parts.push(pick(SIGNOFFS));
   else parts.push(HOOKS[primary] || "What's your angle tonight?");
 
@@ -344,6 +441,9 @@ export function buildShout(ctx = {}) {
   if (P?.commitPending) {
     options.push("M₳X committed today's coin prediction on chain this morning — hidden until tomorrow's reveal. Call your shots BEFORE the day, or don't call them. That's the NIGHTGATE way.");
   }
+  // a fresh release of his own projects is the best shout there is
+  const news = newsLineSpoken();
+  if (news) options.push(`Shipping note from M₳X: ${news}`, `Fresh from the shop: ${news}`);
   return pick(options);
 }
 

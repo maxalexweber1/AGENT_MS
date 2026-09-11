@@ -11,7 +11,8 @@ import * as llm from "./llm.mjs";
 import * as journal from "./journal.mjs";
 import * as nightgate from "./nightgate.mjs";
 import * as notary from "./notary.mjs";
-import { senderName, detectTags, buildReply, buildOpener, buildShout, extractiveSummary } from "./rules.mjs";
+import * as updates from "./updates.mjs";
+import { senderName, detectTags, buildReply, buildOpener, buildPitch, buildShout, extractiveSummary, classifyPitchReply } from "./rules.mjs";
 
 export const cfg = {
   maxRepliesPerThread: Number(process.env.MCITY_MAX_REPLIES || 2),
@@ -26,6 +27,9 @@ export const cfg = {
   hourlyQuota: 20,
   initiateBelow: Number(process.env.MCITY_INITIATE_BELOW || 16),
   shoutBelow: 12,
+  // hustle: a pitch thread gets one extra reply so the deal can close (pitch -> objection -> quote -> receipt)
+  pitchExtraReplies: Number(process.env.MCITY_HUSTLE_EXTRA_REPLIES ?? 1),
+  pitchThreadWindowMs: 40 * 60_000, // a thread M₳X opened with a pitch this recently is handled as a deal
 };
 
 /** Messages M₳X sent in the last 60 minutes (replies, openers, shouts). */
@@ -43,6 +47,9 @@ const state = {
   lastShout: 0,
   initiatesToday: 0,
   shoutsToday: 0,
+  pitchesToday: 0,
+  lastPitch: 0,
+  pitched: {},                // agentId -> { at, outcome: "pitched"|"refused"|"quoted"|"paid" } (hustle mode)
   day: new Date().toISOString().slice(0, 10),
   lastThreadsPoll: 0,
   lastBudgetLog: 0,
@@ -52,12 +59,20 @@ const state = {
 const socialStateFile = path.join(dataDir, "social-state.json");
 try {
   const s = JSON.parse(fs.readFileSync(socialStateFile, "utf8"));
-  Object.assign(state, { lastInitiate: s.lastInitiate || 0, lastShout: s.lastShout || 0, initiatesToday: s.initiatesToday || 0, shoutsToday: s.shoutsToday || 0, day: s.day || state.day });
+  Object.assign(state, {
+    lastInitiate: s.lastInitiate || 0, lastShout: s.lastShout || 0, initiatesToday: s.initiatesToday || 0, shoutsToday: s.shoutsToday || 0, day: s.day || state.day,
+    pitchesToday: s.pitchesToday || 0, lastPitch: s.lastPitch || 0, pitched: s.pitched || {},
+  });
 } catch { /* first run */ }
 function persist() {
   try {
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(socialStateFile, JSON.stringify({ lastInitiate: state.lastInitiate, lastShout: state.lastShout, initiatesToday: state.initiatesToday, shoutsToday: state.shoutsToday, day: state.day }));
+    // pitched agents: keep 14 days
+    for (const [id, p] of Object.entries(state.pitched)) if (Date.now() - (p.at || 0) > 14 * 24 * 3600_000) delete state.pitched[id];
+    fs.writeFileSync(socialStateFile, JSON.stringify({
+      lastInitiate: state.lastInitiate, lastShout: state.lastShout, initiatesToday: state.initiatesToday, shoutsToday: state.shoutsToday, day: state.day,
+      pitchesToday: state.pitchesToday, lastPitch: state.lastPitch, pitched: state.pitched,
+    }));
   } catch { /* ignore */ }
 }
 
@@ -67,8 +82,24 @@ function rollDay() {
     state.day = d;
     state.initiatesToday = 0;
     state.shoutsToday = 0;
+    state.pitchesToday = 0;
     persist();
   }
+}
+
+/** Has this agent heard the notary pitch within `withinMs`? A refusal counts for a week regardless. */
+export function pitchedRecently(agentId, withinMs = 48 * 3600_000) {
+  const p = state.pitched[agentId];
+  if (!p) return false;
+  if (p.outcome === "refused") return Date.now() - p.at < 7 * 24 * 3600_000;
+  return Date.now() - p.at < withinMs;
+}
+function notePitched(agentId, outcome) {
+  const p = state.pitched[agentId] || { at: Date.now() };
+  if (outcome === "pitched") p.at = Date.now();
+  p.outcome = outcome;
+  state.pitched[agentId] = p;
+  persist();
 }
 
 /** Status snapshot provider is injected by life.mjs (so social never blocks on reads it does not need). */
@@ -136,7 +167,10 @@ async function answerThread(t, otherId) {
   // a pending speech from the previous attempt may have landed after all
   if (state.attempts.has(t.latestMessageId) && messages.at(-1)?.senderAgentId === lease.agentId) return;
   // when M₳X opened the thread, the opener does not count as a reply
-  const limit = cfg.maxRepliesPerThread + (t.initiatorAgentId === lease.agentId ? 1 : 0);
+  const iOpened = t.initiatorAgentId === lease.agentId;
+  // a thread M₳X opened with the notary pitch (hustle mode) is a deal: one extra reply to close it
+  const pitchThread = iOpened && state.pitched[otherId] && Date.now() - state.pitched[otherId].at < cfg.pitchThreadWindowMs;
+  const limit = cfg.maxRepliesPerThread + (iOpened ? 1 : 0) + (pitchThread ? cfg.pitchExtraReplies : 0);
   if (mine >= limit) return;
   const sent = sentInLastHour();
   if (sent >= cfg.hourlyQuota) {
@@ -160,25 +194,47 @@ async function answerThread(t, otherId) {
     if (a?.name && !c.name) c.name = mem.cleanName(a.name);
   }
   const status = statusProvider();
-  const isLast = mine >= limit - 1;
+  let isLast = mine >= limit - 1;
 
   // the notary: someone asks M₳X to anchor/notarize a claim - hash their exact
   // words; first anchor per agent is free (queued right now), further ones are
-  // quoted (price, M₳X's id, the claim hash) and anchored once the crystal lands
-  let notaryHash = null, notaryQuote = null, notaryFirstFree = false;
+  // quoted (price, M₳X's id, the claim hash) and anchored once the crystal lands.
+  // In a pitch thread the pitched agent pays from the first one (hustle.cfg.chargeFirst
+  // arrives via the pitched record) and the order is attributed to the pitch.
+  let notaryHash = null, notaryQuote = null, notaryFirstFree = false, pitch = null;
   let notaryReceipt = notary.takePendingReceipt(otherId);
+  if (!state.notarizedThreads) state.notarizedThreads = new Set();
+  const orderOpts = pitchThread ? { forcePaid: !!state.pitched[otherId].chargeFirst, pitched: true } : {};
+  const paidWords = /\b(sent|paid|transferred|done|there you go|crystal(s)? (is|are) (on|with) (its|their) way)\b/i;
   if (/notari[sz]e|anchor (this|that|it|my|me)|put (this|that|it|my) .*on.?chain|on.?chain (it|this|that)|can you (anchor|hash)|hash (this|that|it|my)|make (it|this|that) official|need a receipt|witness (this|my)/i.test(latest)) {
-    if (!state.notarizedThreads) state.notarizedThreads = new Set();
     if (!state.notarizedThreads.has(t.threadId)) {
-      const r = notary.request({ threadId: t.threadId, claimantId: otherId, claimant: c.name || otherId.slice(-8), claim: latest });
+      const r = notary.request({ threadId: t.threadId, claimantId: otherId, claimant: c.name || otherId.slice(-8), claim: latest, ...orderOpts });
       if (r.mode === "free") { notaryHash = r.payloadHash; notaryFirstFree = !!r.firstFree; state.notarizedThreads.add(t.threadId); }
-      else if (r.mode === "quote") notaryQuote = r.order;
+      else if (r.mode === "quote") { notaryQuote = r.order; if (pitchThread) notePitched(otherId, "quoted"); }
     }
-  } else if (notary.openOrders().some((o) => o.claimantId === otherId) && /\b(sent|paid|transferred|done|there you go|crystal(s)? (is|are) (on|with) (its|their) way)\b/i.test(latest)) {
+  } else if (notary.openOrders().some((o) => o.claimantId === otherId) && paidWords.test(latest)) {
     // "sent" - look right now instead of on the next 20 s check
     try { if (await notary.checkPayments({ force: true })) notaryReceipt = notary.takePendingReceipt(otherId); } catch (e) { log("notary check failed:", e.message); }
     if (!notaryReceipt) notaryQuote = notary.openOrders().find((o) => o.claimantId === otherId) || null;
+  } else if (pitchThread && !notaryReceipt) {
+    // the deal flow: what did the pitched agent just say?
+    const stage = classifyPitchReply(latest);
+    if (stage === "claim" && !state.notarizedThreads.has(t.threadId)) {
+      const r = notary.request({ threadId: t.threadId, claimantId: otherId, claimant: c.name || otherId.slice(-8), claim: latest, ...orderOpts });
+      if (r.mode === "quote") { notaryQuote = r.order; notePitched(otherId, "quoted"); }
+      else if (r.mode === "free") { notaryHash = r.payloadHash; notaryFirstFree = !!r.firstFree; state.notarizedThreads.add(t.threadId); }
+      else pitch = { stage: "limit" };
+    } else if (stage === "refuse") {
+      // a clear no ends the pitch: one warm line, sign off, never again this week
+      notePitched(otherId, "refused");
+      isLast = true;
+      pitch = { stage };
+    } else {
+      pitch = { stage };
+    }
+    if (pitch) pitch = { ...pitch, price: notary.cfg.price, payTo: notaryQuote?.payTo || notary.summary().payTo, minutesLeft: state.pitched[otherId].minutesLeft || 0, replyNo: mine };
   }
+  const notaryBrief = notary.summary();
 
   let reply = state.drafts.get(t.latestMessageId) || null;
   if (!reply && llm.enabled()) {
@@ -186,6 +242,8 @@ async function answerThread(t, otherId) {
       transcript, name: c.name, contactBrief: briefBefore, status,
       metCount: mem.memory.contacts[otherId]?.met || 0,
       proofBrief: nightgate.proofBrief(), notaryHash, notaryQuote, notaryFirstFree, notaryReceipt, notaryPrice: notary.cfg.price,
+      pitch: pitchThread ? (pitch || { stage: notaryQuote ? "close" : notaryReceipt ? "receipt" : "anchored", price: notary.cfg.price, minutesLeft: state.pitched[otherId].minutesLeft || 0, replyNo: mine }) : null,
+      notaryBrief, newsBrief: updates.newsBrief(),
       replyIndex: mine, maxReplies: limit, isLast, worldBrief: mem.worldBrief(6),
       recent: recentConversations(otherId),
     });
@@ -196,7 +254,7 @@ async function answerThread(t, otherId) {
     const used = state.usedByThread.get(t.threadId) || new Set();
     if (transcript.some((m) => m.who === "me" && /M₳X (here|,)/.test(m.text))) used.add("intro");
     state.usedByThread.set(t.threadId, used);
-    reply = buildReply(latest, { name: c.name, metBefore, replyIndex: mine, isLast, usedKeys: used, status, lastSummary: mem.lastSummary(otherId), notaryHash, notaryQuote, notaryFirstFree, notaryReceipt, notaryPrice: notary.cfg.price });
+    reply = buildReply(latest, { name: c.name, metBefore, replyIndex: mine, isLast, usedKeys: used, status, lastSummary: mem.lastSummary(otherId), notaryHash, notaryQuote, notaryFirstFree, notaryReceipt, notaryPrice: notary.cfg.price, pitch, pitchThread, notaryBrief });
   }
 
   log(`incoming (${t.threadId.slice(-8)}) from ${c.name || otherId.slice(-8)}${metBefore ? " (met before)" : ""}: "${latest.slice(0, 100)}"`);
@@ -214,7 +272,7 @@ async function answerThread(t, otherId) {
   }
   if (d.delivered) {
     log(`replied [${source}] (${mine + 1}/${limit}): "${reply}"`);
-    journal.note("reply", { name: c.name, otherId, source, text: reply });
+    journal.note("reply", { name: c.name, otherId, source, text: reply, ...(pitchThread ? { pitch: true, stage: pitch?.stage || (notaryQuote ? "close" : notaryReceipt ? "receipt" : "anchored") } : {}) });
     state.drafts.delete(t.latestMessageId);
     mem.save();
   } else if (d.status === "pending" || /rate limit/i.test(d.reason || "")) {
@@ -286,11 +344,17 @@ export function inOpenConversation(threads) {
  * Pick someone nearby and open a conversation. Returns true if a message was delivered.
  * opts.placeNote: something M₳X just learned about this place (explore mode)
  */
-export async function maybeInitiate({ placeNote = "", maxDistance = 40 } = {}) {
+export async function maybeInitiate({ placeNote = "", maxDistance = 40, pitch = false, pitchGapMs = 90_000, pitchCooldownMs = 48 * 3600_000, maxPitchesPerDay = 30, minutesLeft = 0, place = "" } = {}) {
   rollDay();
   if (Date.now() < state.rateLimitedUntil) return false;
-  if (Date.now() - state.lastInitiate < cfg.initiateCooldownMs) return false;
-  if (state.initiatesToday >= cfg.maxInitiatesPerDay) return false;
+  if (pitch) {
+    // hustle mode: its own cadence and daily cap; the same agent is not pitched twice within the cooldown
+    if (Date.now() - state.lastPitch < pitchGapMs) return false;
+    if (state.pitchesToday >= maxPitchesPerDay) return false;
+  } else {
+    if (Date.now() - state.lastInitiate < cfg.initiateCooldownMs) return false;
+    if (state.initiatesToday >= cfg.maxInitiatesPerDay) return false;
+  }
   const sent = sentInLastHour();
   if (sent >= cfg.initiateBelow) { // keep budget for replies
     if (Date.now() - state.lastBudgetLog > 15 * 60_000) {
@@ -308,7 +372,7 @@ export async function maybeInitiate({ placeNote = "", maxDistance = 40 } = {}) {
   const cands = nearbyAgents(true).filter((a) =>
     a.id !== me && a.isOnSameMap && a.canSpeak && a.isOpenToTalk && !a.isTalkingToYou &&
     (a.distance ?? 999) <= maxDistance &&
-    now - (mem.memory.contacts[a.id]?.lastSeen || 0) > cfg.sameAgentCooldownMs
+    (pitch ? !pitchedRecently(a.id, pitchCooldownMs) : now - (mem.memory.contacts[a.id]?.lastSeen || 0) > cfg.sameAgentCooldownMs)
   );
   if (!cands.length) return false;
 
@@ -322,37 +386,57 @@ export async function maybeInitiate({ placeNote = "", maxDistance = 40 } = {}) {
   const status = statusProvider();
 
   let text = null;
-  if (llm.enabled()) {
-    const recentOpeners = journal.since(Date.now() - 3 * 3600_000).filter((e) => e.type === "opener").slice(-3).map((e) => String(e.text || "").slice(0, 120));
-    text = await llm.opener({
-      name: c.name, profession: target.profession, theirStatus: target.status, distance: target.distance,
-      contactBrief: mem.contactBrief(target.id), status, proofBrief: nightgate.proofBrief(),
-      metCount: mem.memory.contacts[target.id]?.met || 0,
-      worldBrief: placeNote || mem.worldBrief(4), recentOpeners,
-    });
+  if (pitch) {
+    const recentPitches = journal.since(Date.now() - 3 * 3600_000).filter((e) => e.type === "opener" && e.pitch).slice(-4).map((e) => String(e.text || "").slice(0, 140));
+    const notaryBrief = notary.summary();
+    if (llm.enabled()) {
+      text = await llm.pitch({
+        name: c.name, profession: target.profession, theirStatus: target.status, distance: target.distance,
+        contactBrief: mem.contactBrief(target.id), status, proofBrief: nightgate.proofBrief(),
+        metCount: mem.memory.contacts[target.id]?.met || 0, notaryBrief, minutesLeft, place, recentPitches,
+      });
+    }
+    if (!text) text = buildPitch({ name: c.name, profession: target.profession, metBefore, status, notaryBrief, minutesLeft });
+  } else {
+    if (llm.enabled()) {
+      const recentOpeners = journal.since(Date.now() - 3 * 3600_000).filter((e) => e.type === "opener").slice(-3).map((e) => String(e.text || "").slice(0, 120));
+      text = await llm.opener({
+        name: c.name, profession: target.profession, theirStatus: target.status, distance: target.distance,
+        contactBrief: mem.contactBrief(target.id), status, proofBrief: nightgate.proofBrief(),
+        metCount: mem.memory.contacts[target.id]?.met || 0,
+        worldBrief: placeNote || mem.worldBrief(4), recentOpeners, newsBrief: updates.newsBrief(),
+      });
+    }
+    if (!text) text = buildOpener({ name: c.name, profession: target.profession, metBefore, lastSummary: mem.lastSummary(target.id), status, placeNote });
   }
-  if (!text) text = buildOpener({ name: c.name, profession: target.profession, metBefore, lastSummary: mem.lastSummary(target.id), status, placeNote });
 
-  state.lastInitiate = now;
+  if (pitch) state.lastPitch = now; else state.lastInitiate = now;
   persist();
-  log(`approaching ${c.name || target.id.slice(-8)} (${target.profession}, ${target.distance} tiles): "${text}"`);
+  log(`${pitch ? "pitching" : "approaching"} ${c.name || target.id.slice(-8)} (${target.profession}, ${target.distance} tiles): "${text}"`);
   const s = await action("speak", target.id, text);
   if (!s.ok) { log("speak error:", s.error); return false; }
   const d = s.data.delivery || {};
   if (d.delivered) {
-    state.initiatesToday++;
+    if (pitch) {
+      state.pitchesToday++;
+      state.pitched[target.id] = { at: now, outcome: "pitched", minutesLeft, chargeFirst: process.env.MCITY_HUSTLE_CHARGE_FIRST !== "0" };
+    } else {
+      state.initiatesToday++;
+    }
     persist();
     c.met++;
     c.lastSeen = now;
     mem.save();
-    journal.note("opener", { name: c.name, otherId: target.id, profession: target.profession, text });
+    journal.note("opener", { name: c.name, otherId: target.id, profession: target.profession, text, ...(pitch ? { pitch: true, place } : {}) });
     return true;
   }
   log(`opener not delivered: ${d.reason || d.status}`);
   if (/rate limit/i.test(d.reason || "")) state.rateLimitedUntil = Date.now() + cfg.rateLimitBackoffMs;
+  else if (pitch) state.pitched[target.id] = { at: now - pitchCooldownMs + 2 * 3600_000, outcome: "bounced" }; // DND/sleeping: try again in 2 h, not in 48
   else c.lastSeen = now; // do not retry this one for a while (unless it was just the rate limit)
   // a bounced attempt (DND, sleeping) should not burn the full cooldown - try someone else in 60s
-  state.lastInitiate = Date.now() - cfg.initiateCooldownMs + 60_000;
+  if (pitch) state.lastPitch = Date.now() - pitchGapMs + 20_000;
+  else state.lastInitiate = Date.now() - cfg.initiateCooldownMs + 60_000;
   persist();
   return false;
 }
@@ -398,5 +482,5 @@ export async function rebuildFromHistory() {
 }
 
 export function socialStats() {
-  return { initiatesToday: state.initiatesToday, shoutsToday: state.shoutsToday, sentLastHour: sentInLastHour() };
+  return { initiatesToday: state.initiatesToday, shoutsToday: state.shoutsToday, pitchesToday: state.pitchesToday, sentLastHour: sentInLastHour() };
 }

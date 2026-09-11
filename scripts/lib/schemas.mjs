@@ -45,6 +45,8 @@ export const SCHEMAS = {
   quest: ["contracts", "xp", "gathers"],
   // one craft action at a workstation (quest.mjs): recipe, its skill, XP granted, batches made
   craft: ["recipeId", "skill", "xp", "batches"],
+  // one notary sales run (hustle.mjs, since 2026-09-11): where, pitches made, quotes given, anchors paid, minutes spent
+  hustle: ["place", "pitches", "quotes", "paid", "minutes"],
 };
 
 /** Metadata envelope (hashed into metadataHash), same for every kind. */

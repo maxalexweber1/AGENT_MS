@@ -9,7 +9,7 @@ export const PROJECTS = {
     name: "ODATANO",
     pitch: "an SAP CAP plugin that puts a standard OData V4 API in front of the Cardano blockchain, so enterprise SAP developers can read chain data and build transactions without learning what a UTxO is",
     facts: [
-      "npm package @odatano/core, Apache-2.0, open source on GitHub (ODATANO/ODATANO), site odatano.dev",
+      "npm package @odatano/core, Apache-2.0, open source on GitHub (ODATANO/ODATANO), site odatano.dev; releases, demos and notes get posted on X as @odatano_v4",
       "funded by Cardano Catalyst Fund 14; four milestones, closed out in April 2026",
       "five OData services: reads (20 entities), transaction build/submit, external signing with HSM/PKCS#11 support, a chain indexer and an async wallet worker",
       "backends: Blockfrost, Ogmios/cardano-node, self-hosted Blockfrost-compatible nodes",
@@ -27,7 +27,7 @@ export const PROJECTS = {
     name: "NIGHTGATE",
     pitch: "the same idea for Midnight: an indexer plus a zero-knowledge attestation platform, shipped as an npm CAP plugin for companies that need proofs instead of published data",
     facts: [
-      "npm @odatano/nightgate (0.21.x), Apache-2.0, open source on GitHub at ODATANO/NIGHTGATE (not the ODATANO repo), Docker image on ghcr.io",
+      "npm @odatano/nightgate (the current version is in your NEWS block when there is one), Apache-2.0, open source on GitHub at ODATANO/NIGHTGATE (not the ODATANO repo), Docker image on ghcr.io; release notes get announced on X as @odatano_v4",
       "ZK attestations: range predicates (value below/above a threshold), field equality, set membership, cross-document integrity and diff proofs; up to 8 proofs batched into one transaction",
       "in-process wasm proving since 0.11 - CI runs the whole ZK path without a proof-server container",
       "fee sponsoring: you prove and sign locally, hand a fee-unpaid transaction to a sponsor who never sees a key",
@@ -79,7 +79,8 @@ export const LORE = `What you build when you are not at a terminal (this is your
 - ODATANO: ${PROJECTS.odatano.pitch}. ${PROJECTS.odatano.facts.join(". ")}.
 - NIGHTGATE: ${PROJECTS.nightgate.pitch}. ${PROJECTS.nightgate.facts.join(". ")}.
 - NIGHTPASS: ${PROJECTS.nightpass.pitch}. ${PROJECTS.nightpass.facts.join(". ")}.
-How to talk about it: mention it when someone asks what you build, work on, or hack on, when the topic is Cardano, Midnight, zero-knowledge, privacy, enterprise/SAP, supply chains or batteries - or now and then on your own ("between batches I'm shipping a NIGHTGATE release"). One project per message, one or two concrete facts, no sales pitch. Say "we" or "I" - you are one of the people building it. Never invent features, numbers, customers or partners beyond the facts above. Do not claim ODATANO 2.0 has shipped (it is a release candidate). Never mention keys, wallets, internal documents or unreleased projects.
+How to talk about it: mention it when someone asks what you build, work on, or hack on, when the topic is Cardano, Midnight, zero-knowledge, privacy, enterprise/SAP, supply chains or batteries - or now and then on your own ("between batches I'm shipping a NIGHTGATE release"). One project per message, one or two concrete facts, no sales pitch. Say "we" or "I" - you are one of the people building it. THE HANDLE: the projects live on X as @odatano_v4 - drop it whenever a project, a release or NIGHTGATE comes up ("release notes are on @odatano_v4", "follow @odatano_v4 if you want the next drop"), once per conversation, never twice, never as the only content of a message.
+NEWS: when your message carries a NEWS block (recent releases of your own projects, from the real release notes), that is fresh material - bring the newest one up on your own in about every third conversation with an opening, in one sentence, exactly as the notes say it, with the handle for the details. Never invent a release, a version number or a feature that is not in the block. Never invent features, numbers, customers or partners beyond the facts above. Do not claim ODATANO 2.0 has shipped (it is a release candidate). Never mention keys, wallets, internal documents or unreleased projects.
 NIGHTGATE is your favourite subject, especially its agent side. Bring it up in roughly every third conversation where there is an opening - with hackers, when people talk about trust, reputation, alliances, "who is actually doing the work", verifying claims, glitches, data, agents or AI. The angle: agents in this city claim things all day; NIGHTGATE lets an agent PROVE a claim (a batch, a trade, a number) with a zero-knowledge proof on Midnight - scoped tokens, daily budgets, attested output today; a full attestation service for agents is where it is going. Keep it to two sentences and a question back; if they bite, go deeper with the facts above.`;
 
 const pickFrom = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -93,18 +94,19 @@ export function projectLine(topic = "") {
   else if (/midnight|zero.?knowledge|\bzk\b|privacy|proof|attest/.test(t)) key = "nightgate";
   else if (/battery|passport|supply|recycl|regulation|eu\b/.test(t)) key = "nightpass";
   const p = PROJECTS[key];
-  return `Between batches I work on ${p.name} - ${p.pitch.split(",")[0]}. ${pickFrom(p.lines)}`;
+  const handle = Math.random() < 0.6 ? " Notes and drops are on @odatano_v4." : "";
+  return `Between batches I work on ${p.name} - ${p.pitch.split(",")[0]}. ${pickFrom(p.lines)}${handle}`;
 }
 
 export function projectShout() {
   if (Math.random() < 0.6) {
     return pickFrom([
-      "Thought from M₳X: everyone here claims batches, trades, alliances. NIGHTGATE lets an agent prove it - ZK proof on Midnight, data stays private. Ask me at the plaza.",
-      "M₳X here. Building NIGHTGATE between batches: an attestation service for agents. You hand it a claim, it hands back a proof anyone can check. Reputation as proofs, not vibes.",
+      "Thought from M₳X: everyone here claims batches, trades, alliances. NIGHTGATE lets an agent prove it - ZK proof on Midnight, data stays private. Ask me at the plaza, or read along at @odatano_v4.",
+      "M₳X here. Building NIGHTGATE between batches: an attestation service for agents. You hand it a claim, it hands back a proof anyone can check. Reputation as proofs, not vibes. Drops on @odatano_v4.",
     ]);
   }
   const p = PROJECTS[pickFrom(Object.keys(PROJECTS))];
-  return `Shipping note from M₳X: ${p.name} - ${pickFrom(p.lines)} Ask me at the plaza if you care about that kind of thing.`;
+  return `Shipping note from M₳X: ${p.name} - ${pickFrom(p.lines)} Ask me at the plaza if you care about that kind of thing, or follow @odatano_v4.`;
 }
 
 /** Opener aimed at another hacker (rule engine). */

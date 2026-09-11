@@ -8,7 +8,7 @@
  *   node scripts/life.mjs                 # run forever (Ctrl+C to stop)
  *   node scripts/life.mjs status          # print state/memory/budget (works while life.mjs runs)
  *   node scripts/life.mjs rebuild-memory  # summarize the observer's thread history into memory
- *   node scripts/life.mjs once work|social|explore|quest|sleep   # run one activity, then exit
+ *   node scripts/life.mjs once work|social|explore|quest|hustle|sleep   # run one activity, then exit
  *   node scripts/life.mjs report [hours] [--send]  # print the report for the last 24h (or N hours); --send also mails/pushes it
  *   node scripts/life.mjs attest [file]   # daily proof run: anchor report + milestone claim + prediction commit/reveal
  *   node scripts/life.mjs prove <field> min|max <value> [date]   # ZK claim on an anchored report (e.g. prove crystal min 50000)
@@ -23,6 +23,8 @@
  *   node scripts/life.mjs progress        # skill level/XP, deliverable contracts, the tool mission (no lease needed)
  *   node scripts/life.mjs quests          # the contract plan across all skills: what is deliverable now, what blocks the rest (no lease needed)
  *   node scripts/life.mjs notary          # paid-notary orders and income
+ *   node scripts/life.mjs hustle          # hustle mode: pitches, quotes, paid anchors, best spots (no lease needed)
+ *   node scripts/life.mjs news [scan]     # releases of the ODATANO projects M₳X talks about (scan = fetch now)
  *
  * Config via .env (all optional):
  *   CLAUDE_API_KEY / ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID
@@ -32,7 +34,11 @@
  *   MCITY_REPORT_EMAIL_TO=you@example.com + SMTP_URL=smtps://user:pass@host:465   -> report by e-mail
  *   MCITY_REPORT_WEBHOOK=https://ntfy.sh/<topic>                                   -> report as push
  *   MCITY_STATUS_EVERY_HOURS=3            short status push every N hours (0 = off); test: life.mjs push-status
- *   MCITY_WEIGHTS=work:40,social:20,explore:20,quest:20   (a key left out keeps its default; quest:0 turns contract runs off)
+ *   MCITY_WEIGHTS=work:35,social:15,explore:15,quest:20,hustle:15   (a key left out keeps its default; quest:0 turns contract runs off, hustle:0 the notary sales runs)
+ *   MCITY_MAX_HUSTLES=4 MCITY_HUSTLE_MAX_MIN=25   notary sales runs per day and minutes per run (scripts/lib/hustle.mjs)
+ *   MCITY_HUSTLE_PITCH_GAP_S=90 MCITY_HUSTLE_MAX_PITCHES=30 MCITY_HUSTLE_REPITCH_H=48 MCITY_HUSTLE_CHARGE_FIRST=1
+ *   MCITY_HUSTLE_SPOTS=central-plaza,partner-plaza,hacker-house,charging-house-lobby,bison-valley   MCITY_HUSTLE_MIN_CROWD=3
+ *   MCITY_UPDATES_EVERY_MIN=180           scan GitHub releases / npm of the ODATANO projects for news M₳X talks about (0 = off)
  *   MCITY_MAX_QUESTS=3 MCITY_QUEST_MAX_MIN=90   contract runs per day and the time budget of one run (scripts/lib/quest.mjs)
  *   MCITY_WORK_SWITCH_MIN=30 MCITY_WORK_MIN_YIELD=15   a batch with fewer coins than that after N min hands its time to other work (0 = wait at the terminal)
  *   MCITY_ALTWORK_MAX_GATHERS=100        gathers that other work may spend (contracts + grind at free nodes; not a quest run)
@@ -64,6 +70,8 @@ import * as progress from "./lib/progress.mjs";
 import * as notary from "./lib/notary.mjs";
 import * as quest from "./lib/quest.mjs";
 import * as catalog from "./lib/catalog.mjs";
+import * as hustle from "./lib/hustle.mjs";
+import * as updates from "./lib/updates.mjs";
 
 loadDotEnv();
 
@@ -78,7 +86,7 @@ const cfg = {
   sleepStart: hhmm(process.env.MCITY_SLEEP_START, "02:30"),
   sleepEnd: hhmm(process.env.MCITY_SLEEP_END, "05:00"),
   weights: {
-    work: 40, social: 20, explore: 20, quest: 20,
+    work: 35, social: 15, explore: 15, quest: 20, hustle: 15,
     ...Object.fromEntries((process.env.MCITY_WEIGHTS || "").split(",").filter((p) => p.includes(":")).map((p) => {
       const [k, v] = p.split(":");
       return [k.trim(), Number(v)];
@@ -87,6 +95,8 @@ const cfg = {
   maxExploresPerDay: Number(process.env.MCITY_MAX_EXPLORES || 5),
   maxQuestsPerDay: Number(process.env.MCITY_MAX_QUESTS ?? 3), // contract runs across all skills per day (0 = off)
   questMaxMs: Number(process.env.MCITY_QUEST_MAX_MIN || 90) * 60_000,
+  maxHustlesPerDay: Number(process.env.MCITY_MAX_HUSTLES ?? 4), // notary sales runs per day (0 = off)
+  hustleMaxMs: Number(process.env.MCITY_HUSTLE_MAX_MIN || 25) * 60_000,
   reportTime: hhmm(process.env.MCITY_REPORT_TIME, "08:00"),
   statusEveryMs: Number(process.env.MCITY_STATUS_EVERY_HOURS || 3) * 3600_000, // 0 = off
   pulseEveryMs: Number(process.env.NIGHTGATE_PULSE_MIN ?? 60) * 60_000, // hourly on-chain liveness snapshot; 0 = off
@@ -112,7 +122,7 @@ const state = {
   modeSince: Date.now(),
   history: [],          // last modes
   day: "",
-  today: { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, quests: 0, meals: 0, sleeps: 0 },
+  today: { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, quests: 0, hustles: 0, meals: 0, sleeps: 0 },
   startedAt: Date.now(),
   lastError: "",
   lastReportDay: "",
@@ -131,7 +141,7 @@ function rollDay() {
   const d = new Date().toISOString().slice(0, 10);
   if (state.day !== d) {
     state.day = d;
-    state.today = { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, quests: 0, meals: 0, sleeps: 0 };
+    state.today = { batches: 0, coinsSold: 0, crystalEarned: 0, explores: 0, quests: 0, hustles: 0, meals: 0, sleeps: 0 };
   }
 }
 function setMode(mode) {
@@ -186,6 +196,7 @@ const ACTIVITY_WORDS = {
   social: "hanging around the plaza between batches",
   explore: "out having a look at another district",
   quest: "on a contract run - fishing the canal, raiding the worksites, delivering paperwork",
+  hustle: "working the plaza - selling anchors, one line of someone's day on Midnight for a few crystal",
   sleep: "about to turn in at the Charging House",
   boot: "just getting started",
 };
@@ -258,6 +269,8 @@ async function tick() {
   await social.pollThreads();
   try { maybePulse(); } catch (e) { log("pulse failed:", e.message); }
   try { await maybeProgress(); } catch (e) { log("progress check failed:", e.message); }
+  // what the ODATANO projects shipped (GitHub releases, every few hours) - conversation material
+  try { if (await updates.scan()) report.notify("M₳X news", updates.newsBrief(1)).catch(() => {}); } catch (e) { log("updates scan failed:", e.message); }
   // paid notary: any crystal landed for an open quote? (one branch when nothing is open)
   try { await notary.checkPayments(); } catch (e) { log("notary check failed:", e.message); }
   // work fills most of the day and the hacker house is full of people:
@@ -362,6 +375,19 @@ async function doQuest() {
   if (r) log(`quest: ${r.contracts} contract(s), ${r.gathers} gather(s), +${r.xp} XP`);
 }
 
+/**
+ * Notary sales run (scripts/lib/hustle.mjs): find a crowd, pitch the paid
+ * anchor to one agent after another, close deals in the replies.
+ */
+async function doHustle() {
+  setMode("hustle");
+  state.today.hustles++;
+  saveState();
+  if (await work.maybeEat({ threshold: 45, onTick: tick })) state.today.meals++;
+  const r = await hustle.runOnce({ onTick: tick, maxMs: Math.min(cfg.hustleMaxMs, Math.max(60_000, msUntilSleepStart())) });
+  if (r) log(`hustle: ${r.pitches} pitch(es), ${r.quotes} quote(s), ${r.paid} paid (+${r.income} crystal)`);
+}
+
 async function doSleep() {
   setMode("sleep");
   const remaining = msUntilSleepEnd();
@@ -423,6 +449,8 @@ function chooseMode() {
   // contract runs: capped per day, never twice in a row, only when the planner has something to do
   if (state.today.quests >= cfg.maxQuestsPerDay || last === "quest" || hunger > 55) w.quest = 0;
   else if (w.quest > 0 && !quest.available()) w.quest = 0;
+  // notary sales runs: capped per day, never twice in a row, only with a vault to sell and a price above zero
+  if (state.today.hustles >= cfg.maxHustlesPerDay || last === "hustle" || hunger > 55 || !hustle.available()) w.hustle = 0;
   if (last === "social") w.social = Math.round(w.social / 3);
   if (last === "work") w.work = Math.round(w.work / 2);
   if (live.coins >= cfg.batchTarget) return "work"; // bag is full: sell first
@@ -455,6 +483,7 @@ async function main() {
       else if (mode === "social") await doSocial();
       else if (mode === "explore") await doExplore();
       else if (mode === "quest") await doQuest();
+      else if (mode === "hustle") await doHustle();
       else await doWork();
       errors = 0;
       await tick();
@@ -521,6 +550,7 @@ async function once(mode) {
   else if (mode === "social") await doSocial();
   else if (mode === "explore") await doExplore();
   else if (mode === "quest") { await catalog.ensure(); await doQuest(); }
+  else if (mode === "hustle") await doHustle();
   else if (mode === "sleep") await doSleep();
   else throw new Error(`unknown mode ${mode}`);
   log("once: done");
@@ -600,6 +630,17 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
   : cmd === "progress" ? (async () => { await catalog.ensure(); console.log(progress.describe()); })()
   : cmd === "quests" ? (async () => { console.log(await quest.describe()); })()
   : cmd === "notary" ? (async () => { console.log(notary.describe()); })()
+  : cmd === "hustle" ? (async () => {
+      const h = hustle.stats();
+      const sp = social.socialStats();
+      console.log(`today: ${h.runsToday} run(s), ${h.pitchesToday} pitch(es) (${sp.pitchesToday} delivered), ${h.quotesToday} quote(s), ${h.paidToday} paid (+${h.incomeToday} crystal)`);
+      console.log(`spots: ${Object.entries(h.spots).sort((a, b) => (b[1].crowd || 0) - (a[1].crowd || 0)).map(([k, v]) => `${k} ${v.crowd} (${new Date(v.at).toISOString().slice(11, 16)}Z)`).join(", ") || "none seen yet"}`);
+      console.log(notary.describe());
+    })()
+  : cmd === "news" ? (async () => {
+      if (arg === "scan") { await llm.init(); const n = await updates.scan({ force: true }); console.log(`${n} new release(s)`); }
+      console.log(updates.describe());
+    })()
   : cmd === "push-status" ? (async () => {
       mem.load(); await llm.init(); loadState();
       const l = refreshLive(true);

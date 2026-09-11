@@ -28,7 +28,7 @@ transaction to a NIGHTGATE fee sponsor.
 | **Daily report** (crystal, coins sold, meals, conversations, …) | structured document anchor: `attest` + salted Merkle `anchorContentRoot` | every morning |
 | **Every sold batch** of meme coins | plain `attest` over a canonical mini-document | ~5–15×/day |
 | **Every finished conversation** and **every exploration** | plain `attest` (only the hash goes on chain; content stays local) | as they happen |
-| **Claims of OTHER agents** (free notary service) | someone asks M₳X to anchor a claim in-game; he hashes their exact words and hands back the sha256 as a receipt | on request |
+| **Claims of OTHER agents** (notary service, first one free, then paid) | someone asks M₳X to anchor a claim in-game - or M₳X pitches it himself (`hustle` mode); he hashes their exact words and hands back the sha256 as a receipt | on request / sales runs |
 | **"My crystal is ≥ 100,000"** — without revealing the number | `proveFieldPredicate`: ZK range proof against the anchored report's Merkle root | daily milestone |
 | **A hidden prediction of today's coin count** | `attestGuarded` commit/reveal: committed in the morning, revealed the next day — provably made *before* the outcome (the live scoreboard tracks his hit rate) | daily |
 | **"≥ k fields changed between two days"** — without saying which | `proveDocumentComparison` cross-root ZK proof | on demand |
@@ -101,6 +101,41 @@ batches per action, `MCITY_QUEST_GRIND`). Combat skills are skipped. Every deliv
 and every run is anchored on Midnight (`contract`, `quest`); level-ups in any
 skill are anchored and pushed. `node scripts/life.mjs quests` prints the
 current plan without the lease.
+
+### Selling anchors (`hustle` mode)
+
+Since 2026-09-11 M₳X also sells the paid notary instead of waiting to be
+asked. A mode `hustle` (weight `hustle:15`, up to `MCITY_MAX_HUSTLES` runs a
+day, `MCITY_HUSTLE_MAX_MIN` minutes each, `scripts/lib/hustle.mjs`) walks the
+hangout spots until enough approachable agents are in reach, then pitches
+one agent every `MCITY_HUSTLE_PITCH_GAP_S` seconds: one line of theirs,
+hashed and anchored on Midnight for `MCITY_NOTARY_PRICE` crystal, sha256
+receipt, verifiable by anyone. The pitch is persuasive and stays honest: the
+sponsor really pays the chain fee, verification really is public, the
+numbers he quotes (his own anchors, paid customers) are real, the time he
+says he has left at the spot is real. Nothing invented, no fake scarcity,
+and a clear "no" gets one warm line and a sign-off (that agent is not
+pitched again for a week; everyone else not for `MCITY_HUSTLE_REPITCH_H`
+hours). Replies in a pitch thread run through a small deal flow: a question
+or objection gets a one-line answer and the ask for their line, "sure" gets
+the ask for the line, a claim gets the quote (price, M₳X's agent id, the
+claim's sha256), "sent" triggers the payment check and the receipt. Pitched
+agents pay from the first anchor (`MCITY_HUSTLE_CHARGE_FIRST`; the free
+first one stays for people who ask on their own). Every run is anchored
+(`hustle`), the report and the status push count pitches, quotes and paid
+anchors; `node scripts/life.mjs hustle` shows today's numbers and the spots.
+
+### Release news (`scripts/lib/updates.mjs`)
+
+Every `MCITY_UPDATES_EVERY_MIN` minutes M₳X reads the public GitHub releases
+of ODATANO/NIGHTGATE and ODATANO/ODATANO (npm dist-tags as the fallback). A
+new release becomes one sentence in his voice from the real release notes,
+lands in the journal (`release`), the daily report and a push, and feeds
+every prompt as the NEWS block: he brings the newest one up in roughly every
+third conversation with an opening, answers "anything new?" with it (rule
+intent `news`), uses it as an opener angle and as a shout - always with the
+X handle `@odatano_v4` for the details, which he also drops whenever the
+projects come up. `node scripts/life.mjs news [scan]` lists what he knows.
 
 ## How the NIGHTGATE integration works
 
