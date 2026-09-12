@@ -35,7 +35,10 @@ import * as nightgate from "./nightgate.mjs";
 import * as notary from "./notary.mjs";
 
 export const cfg = {
-  spots: (process.env.MCITY_HUSTLE_SPOTS || "central-plaza,partner-plaza,hacker-house,charging-house-lobby,bison-valley").split(",").map((s) => s.trim()).filter(Boolean),
+  // where the people actually are (12.09.2026, 06:20 UTC sample of `agents`): 113 of 115 agents on M₳X's map
+  // stood in hacker-house-interior at the terminals; the plazas of central were empty in all 26 spot
+  // checks of the first 9 runs. `hacker-house` is the door outside - the crowd is inside.
+  spots: (process.env.MCITY_HUSTLE_SPOTS || "hacker-house-interior,central-plaza,partner-plaza,charging-house,bison-valley").split(",").map((s) => s.trim()).filter(Boolean),
   minCrowd: Number(process.env.MCITY_HUSTLE_MIN_CROWD ?? 3),      // approachable agents in reach before M₳X settles at a spot
   maxMoves: Number(process.env.MCITY_HUSTLE_MAX_MOVES ?? 3),      // spots tried per run when the crowd is thin
   maxDistance: Number(process.env.MCITY_HUSTLE_DISTANCE ?? 60),   // tiles
@@ -63,10 +66,18 @@ function save() {
   } catch (e) { log("hustle state write failed:", e.message); }
 }
 
-/** Approachable agents in reach that have not heard the pitch lately. */
+/**
+ * Approachable agents in reach that have not heard the pitch lately.
+ * `canSpeak` is deliberately NOT required here: the game sets it false for
+ * everyone while M₳X himself is in an open thread (12.09.2026: 475 agents,
+ * canSpeak false on all of them, three threads open) - a crowd estimate
+ * that reads 0 whenever someone is talking to him sends him walking to
+ * empty plazas. The pitch itself still goes through social.maybeInitiate,
+ * which checks canSpeak per target.
+ */
 export function crowd() {
   return social.nearbyAgents(true).filter((a) =>
-    a.isOnSameMap && a.canSpeak && a.isOpenToTalk && (a.distance ?? 999) <= cfg.maxDistance &&
+    a.isOnSameMap && a.isOpenToTalk && (a.distance ?? 999) <= cfg.maxDistance &&
     !social.pitchedRecently(a.id, cfg.pitchCooldownMs)
   ).length;
 }
@@ -92,13 +103,17 @@ export function available() {
 
 async function findCrowd(onTick) {
   const here = getContext();
-  const startArea = here?.position?.areaId || here?.position?.spaceId || "";
-  let best = { areaId: startArea, crowd: crowd() };
+  // the context only carries the space (e.g. "central", "hacker-house-interior"), never an area id;
+  // a space is not a `move-area` target unless it is also listed as one (the hacker house interior is,
+  // the district "central" is not: "could not move to central" in every run before 12.09.2026)
+  const startArea = here?.position?.spaceId || "";
+  let best = { areaId: startArea, crowd: crowd(), walkable: cfg.spots.includes(startArea) };
   if (best.crowd >= cfg.minCrowd) {
     log(`hustle: ${best.crowd} people in reach here (${startArea || "?"}) - staying`);
     return best;
   }
   let moves = 0;
+  let lastVisited = "";
   for (const spot of spotOrder(startArea)) {
     if (moves >= cfg.maxMoves) break;
     moves++;
@@ -108,16 +123,19 @@ async function findCrowd(onTick) {
       log(`hustle: could not reach ${spot}: ${e.message}`);
       continue;
     }
+    lastVisited = spot;
     await sleep(3_000);
     const n = crowd();
     rememberSpot(spot, n);
     log(`hustle: ${spot}: ${n} approachable`);
-    if (n > best.crowd) best = { areaId: spot, crowd: n };
+    if (n > best.crowd) best = { areaId: spot, crowd: n, walkable: true };
     if (n >= cfg.minCrowd) return best;
   }
-  // thin everywhere: settle at the best of what we saw
-  if (best.areaId && best.areaId !== (getContext()?.position?.areaId || "")) {
+  // thin everywhere: settle at the best of what we saw (only walk back to a spot we can actually move to)
+  if (best.walkable && best.areaId !== lastVisited) {
     try { await work.goTo(best.areaId, best.areaId, onTick); } catch (e) { log(`hustle: back to ${best.areaId} failed: ${e.message}`); }
+  } else if (lastVisited) {
+    best = { ...best, areaId: lastVisited }; // we stay where the last check left us
   }
   return best;
 }
@@ -132,7 +150,7 @@ export async function runOnce({ onTick = null, maxMs = 25 * 60_000 } = {}) {
   const tick = async () => { if (onTick) await onTick(); };
 
   const spot = await findCrowd(tick);
-  const place = spot.areaId || getContext()?.position?.spaceId || "central";
+  let place = spot.areaId || getContext()?.position?.spaceId || "central";
   if (!spot.crowd) log("hustle: nobody approachable anywhere - staying reactive for this run");
 
   let nextPitch = 0;
@@ -163,7 +181,9 @@ export async function runOnce({ onTick = null, maxMs = 25 * 60_000 } = {}) {
         if (next) {
           moves++;
           log(`hustle: only ${n} left here - moving to ${next}`);
-          try { await work.goTo(next, next, tick); } catch (e) { log(`hustle: move to ${next} failed: ${e.message}`); }
+          // `place` follows the move - before 12.09.2026 it stayed on the start value, so every
+          // relocation went to the same first spot again and the crowd was booked under the wrong key
+          try { await work.goTo(next, next, tick); place = next; } catch (e) { log(`hustle: move to ${next} failed: ${e.message}`); }
         }
       }
     }

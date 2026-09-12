@@ -129,7 +129,11 @@ const state = {
   lastStatusPush: 0,
 };
 function loadState() {
+  const defaults = { ...state.today };
   try { Object.assign(state, JSON.parse(fs.readFileSync(stateFile, "utf8")), { startedAt: Date.now() }); } catch { /* fresh */ }
+  // a state file written before a counter existed leaves it undefined; `undefined++` is NaN and
+  // NaN never reaches a daily cap (11.09.2026: 6 hustle runs on the first day, cap 4, until rollDay reset it)
+  state.today = { ...defaults, ...(state.today || {}) };
 }
 function saveState() {
   try {
