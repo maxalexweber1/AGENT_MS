@@ -1,5 +1,8 @@
 # secrets & local operator notes
 .env
+# every .env copy (backups like .env.bak-pre-v4-*) holds the same secrets; only the template is public
+.env.*
+!.env.example
 OPERATIONS.local.md
 CLAUDE.md
 
@@ -12,11 +15,15 @@ scripts/.responder-memory.json
 *.log
 
 # local scratch & one-shot ops scripts (not needed to run the agent)
+# - vault/grant migrations and host-side shell helpers stay local; the deploy
+#   tarball packs them from the working tree, git does not need them
 docproof-sample.json
 image.png
 scripts/deploy-vault.mjs
 scripts/backfill-txhash.mjs
 scripts/run-forever.cmd
+scripts/*.sh
+vendor/
 
 node_modules/
 docs/bug-*.md

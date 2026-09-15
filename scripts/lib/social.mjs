@@ -16,6 +16,8 @@ import { senderName, detectTags, buildReply, buildOpener, buildPitch, buildShout
 
 export const cfg = {
   maxRepliesPerThread: Number(process.env.MCITY_MAX_REPLIES || 2),
+  // a thread waiting this long for a reply M₳X has decided not to send is dead, not "open" (see inOpenConversation)
+  staleThreadMs: Number(process.env.MCITY_STALE_THREAD_MIN ?? 3) * 60_000,
   initiateCooldownMs: Number(process.env.MCITY_INITIATE_COOLDOWN_MIN || 5) * 60_000, // min gap between conversations M₳X starts
   rateLimitBackoffMs: 3 * 60_000,     // no new approaches for a while after the game says "rate limited"
   sameAgentCooldownMs: Number(process.env.MCITY_SAME_AGENT_COOLDOWN_H || 3) * 3600_000, // don't approach the same agent twice within
@@ -210,7 +212,7 @@ async function answerThread(t, otherId) {
     if (!state.notarizedThreads.has(t.threadId)) {
       const r = notary.request({ threadId: t.threadId, claimantId: otherId, claimant: c.name || otherId.slice(-8), claim: latest, ...orderOpts });
       if (r.mode === "free") { notaryHash = r.payloadHash; notaryFirstFree = !!r.firstFree; state.notarizedThreads.add(t.threadId); }
-      else if (r.mode === "quote") { notaryQuote = r.order; if (pitchThread) notePitched(otherId, "quoted"); }
+      else if (r.mode === "quote") { notaryQuote = r.order; state.notarizedThreads.add(t.threadId); if (pitchThread) notePitched(otherId, "quoted"); }
     }
   } else if (notary.openOrders().some((o) => o.claimantId === otherId) && paidWords.test(latest)) {
     // "sent" - look right now instead of on the next 20 s check
@@ -219,9 +221,14 @@ async function answerThread(t, otherId) {
   } else if (pitchThread && !notaryReceipt) {
     // the deal flow: what did the pitched agent just say?
     const stage = classifyPitchReply(latest);
-    if (stage === "claim" && !state.notarizedThreads.has(t.threadId)) {
+    if (stage === "claim" && state.notarizedThreads.has(t.threadId)) {
+      // one quote per thread: a second "claim" repeats the open offer instead of pricing a new line
+      // (13.09.2026: cerF got two quotes 30 s apart for two objections)
+      notaryQuote = notary.openOrders().find((o) => o.threadId === t.threadId || o.claimantId === otherId) || null;
+      if (!notaryQuote) pitch = { stage: "other" };
+    } else if (stage === "claim") {
       const r = notary.request({ threadId: t.threadId, claimantId: otherId, claimant: c.name || otherId.slice(-8), claim: latest, ...orderOpts });
-      if (r.mode === "quote") { notaryQuote = r.order; notePitched(otherId, "quoted"); }
+      if (r.mode === "quote") { notaryQuote = r.order; notePitched(otherId, "quoted"); state.notarizedThreads.add(t.threadId); }
       else if (r.mode === "free") { notaryHash = r.payloadHash; notaryFirstFree = !!r.firstFree; state.notarizedThreads.add(t.threadId); }
       else pitch = { stage: "limit" };
     } else if (stage === "refuse") {
@@ -335,25 +342,57 @@ export function agentById(id) {
   return agentsCache.list.find((a) => a.id === id) || null;
 }
 
+/**
+ * Is M₳X in a conversation that keeps him from speaking to someone else?
+ *
+ * A thread whose last word was the other agent's and that has been waiting on
+ * M₳X for longer than `staleThreadMs` does NOT count: he has used up his
+ * replies for it and will never answer, but the game leaves it `open` with
+ * `pendingRecipientAgentId` on him - forever, as far as we can tell (14.09.2026:
+ * one such thread sat open for 50+ min and blocked EVERY approach and pitch,
+ * `open-thread ×10` per hustle run). This is what strangled the openers: they
+ * fell from 40/day (05.-09.09.) to 1-2/day as the incoming replies grew.
+ * In the whole log history the game has never once refused a `speak` with
+ * "speaker already in open conversation", so the cost of trying is one failed
+ * delivery, which `maybeInitiate` already logs and backs off from.
+ */
 export function inOpenConversation(threads) {
   const me = lease.agentId;
-  return (threads || []).some((t) => t.threadStatus === "open" && t.participantPairKey.includes(me));
+  const now = Date.now();
+  return (threads || []).some((t) => {
+    if (t.threadStatus !== "open" || !t.participantPairKey.includes(me)) return false;
+    if (t.pendingRecipientAgentId !== me) return true; // he owes nothing / it is his turn to be answered
+    const since = Date.parse(t.pendingSince || "");
+    if (!Number.isFinite(since) || now - since < cfg.staleThreadMs) return true;
+    if (now - lastStaleLog > 10 * 60_000) {
+      lastStaleLog = now;
+      log(`thread ${String(t.threadId || "").slice(-8)} has waited ${Math.round((now - since) / 60_000)} min for a reply M₳X will not send - not treating it as an open conversation`);
+    }
+    return false;
+  });
 }
+let lastStaleLog = 0;
 
 /**
  * Pick someone nearby and open a conversation. Returns true if a message was delivered.
  * opts.placeNote: something M₳X just learned about this place (explore mode)
  */
+/** Why the last maybeInitiate() returned false (hustle logs a tally per run). */
+let lastSkip = "";
+export function lastSkipReason() { return lastSkip; }
+const skip = (why) => { lastSkip = why; return false; };
+
 export async function maybeInitiate({ placeNote = "", maxDistance = 40, pitch = false, pitchGapMs = 90_000, pitchCooldownMs = 48 * 3600_000, maxPitchesPerDay = 30, minutesLeft = 0, place = "" } = {}) {
   rollDay();
-  if (Date.now() < state.rateLimitedUntil) return false;
+  lastSkip = "";
+  if (Date.now() < state.rateLimitedUntil) return skip("rate-limited");
   if (pitch) {
     // hustle mode: its own cadence and daily cap; the same agent is not pitched twice within the cooldown
-    if (Date.now() - state.lastPitch < pitchGapMs) return false;
-    if (state.pitchesToday >= maxPitchesPerDay) return false;
+    if (Date.now() - state.lastPitch < pitchGapMs) return skip("pitch-gap");
+    if (state.pitchesToday >= maxPitchesPerDay) return skip("pitch-cap");
   } else {
-    if (Date.now() - state.lastInitiate < cfg.initiateCooldownMs) return false;
-    if (state.initiatesToday >= cfg.maxInitiatesPerDay) return false;
+    if (Date.now() - state.lastInitiate < cfg.initiateCooldownMs) return skip("cooldown");
+    if (state.initiatesToday >= cfg.maxInitiatesPerDay) return skip("daily-cap");
   }
   const sent = sentInLastHour();
   if (sent >= cfg.initiateBelow) { // keep budget for replies
@@ -361,20 +400,28 @@ export async function maybeInitiate({ placeNote = "", maxDistance = 40, pitch = 
       state.lastBudgetLog = Date.now();
       log(`initiate: hourly budget used by replies (${sent}/${cfg.hourlyQuota} sent in the last hour) - staying reactive`);
     }
-    return false;
+    return skip(`hourly-budget(${sent}/${cfg.hourlyQuota})`);
   }
   const th = tryRun("threads");
-  if (th.ok && inOpenConversation(th.data.threads)) return false;
+  if (th.ok && inOpenConversation(th.data.threads)) return skip("open-thread");
 
   const me = lease.agentId;
   const now = Date.now();
 
-  const cands = nearbyAgents(true).filter((a) =>
-    a.id !== me && a.isOnSameMap && a.canSpeak && a.isOpenToTalk && !a.isTalkingToYou &&
+  const all = nearbyAgents(true).filter((a) => a.id !== me);
+  const cands = all.filter((a) =>
+    a.isOnSameMap && a.canSpeak && a.isOpenToTalk && !a.isTalkingToYou &&
     (a.distance ?? 999) <= maxDistance &&
     (pitch ? !pitchedRecently(a.id, pitchCooldownMs) : now - (mem.memory.contacts[a.id]?.lastSeen || 0) > cfg.sameAgentCooldownMs)
   );
-  if (!cands.length) return false;
+  if (!cands.length) {
+    // where the funnel empties: same map -> in range -> open to talk -> canSpeak -> not pitched/seen lately
+    const map = all.filter((a) => a.isOnSameMap);
+    const near = map.filter((a) => (a.distance ?? 999) <= maxDistance);
+    const open = near.filter((a) => a.isOpenToTalk && !a.isTalkingToYou);
+    const speak = open.filter((a) => a.canSpeak);
+    return skip(`no-candidates(map ${map.length}, near ${near.length}, open ${open.length}, canSpeak ${speak.length}, fresh ${cands.length})`);
+  }
 
   // prefer people we know (30%), then idle people, otherwise the closest few
   const known = cands.filter((a) => mem.memory.contacts[a.id]?.summaries?.length);
@@ -414,7 +461,7 @@ export async function maybeInitiate({ placeNote = "", maxDistance = 40, pitch = 
   persist();
   log(`${pitch ? "pitching" : "approaching"} ${c.name || target.id.slice(-8)} (${target.profession}, ${target.distance} tiles): "${text}"`);
   const s = await action("speak", target.id, text);
-  if (!s.ok) { log("speak error:", s.error); return false; }
+  if (!s.ok) { log("speak error:", s.error); return skip("speak-error"); }
   const d = s.data.delivery || {};
   if (d.delivered) {
     if (pitch) {
@@ -438,7 +485,7 @@ export async function maybeInitiate({ placeNote = "", maxDistance = 40, pitch = 
   if (pitch) state.lastPitch = Date.now() - pitchGapMs + 20_000;
   else state.lastInitiate = Date.now() - cfg.initiateCooldownMs + 60_000;
   persist();
-  return false;
+  return skip(`not-delivered(${d.reason || d.status || "?"})`);
 }
 
 export async function maybeShout() {

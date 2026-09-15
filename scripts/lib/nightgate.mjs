@@ -9,8 +9,11 @@
  *     field proofs below
  *   - every sold batch, every finished conversation, every exploration:
  *     plain attests over small canonical JSON docs
- *   - commit/reveal predictions (attestGuarded): morning commit of a hidden
- *     prediction, next-morning reveal - provably made BEFORE the outcome
+ *   - commit/reveal predictions: morning attest of sha256(prediction || nonce),
+ *     next-morning attest of the prediction itself - provably made BEFORE the
+ *     outcome (lineage 4 dropped the attestGuarded circuit; see COMMIT_SCHEME)
+ *   - lineage 4 (NIGHTGATE 0.24 / nightgate-tx 0.6): every record is keyed by
+ *     (attesterId, payloadHash); proofs take the record key, verify takes both
  *   - ZK predicates on anchored reports (proveFieldPredicate): e.g.
  *     "crystal >= 50000" without revealing the number
  *   - cross-report diffs (proveDocumentComparison)
@@ -275,10 +278,37 @@ export async function awaitVisible(landed, cfg = config(), { everyMs = 2_000 } =
   return waited;
 }
 
-/** Crawler-free read against live contract state: is payloadHash attested? */
-export function verifyAttestation(payloadHash, cfg = config(), vault = cfg.vault) {
+/**
+ * M₳X' attester id (persistentHash of his attestation secret; unchanged across
+ * vault lineages). Lineage 4 keys every record by (attesterId, payloadHash),
+ * so verification and the record keys of the proof circuits need it.
+ * Order: NIGHTGATE_ATTESTER_ID, derived from the seed, last recorded anchor.
+ */
+let attesterIdCache = null;
+export async function attesterIdOf(cfg = config()) {
+  if (attesterIdCache) return attesterIdCache;
+  const fromEnv = String(process.env.NIGHTGATE_ATTESTER_ID || "").toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(fromEnv)) return (attesterIdCache = fromEnv);
+  if (cfg.seedHex) {
+    try {
+      const { deriveIdentity } = await import("@odatano/nightgate-tx/txbuilder");
+      const id = await deriveIdentity({ seedHex: cfg.seedHex, networkId: cfg.network });
+      return (attesterIdCache = String(id.attesterId).toLowerCase());
+    } catch { /* optional dependency missing - fall back to the log */ }
+  }
+  const last = [...history()].reverse().find((a) => /^[0-9a-f]{64}$/i.test(a.attesterId || ""));
+  if (last) return (attesterIdCache = last.attesterId.toLowerCase());
+  throw new Error("attesterId unknown: set NIGHTGATE_SEED_HEX or NIGHTGATE_ATTESTER_ID");
+}
+
+/**
+ * Crawler-free read against live contract state: is payloadHash attested by
+ * this attester? (NIGHTGATE 0.24 / lineage 4: the record is (attesterId,
+ * payloadHash); a payloadHash alone is a 400.)
+ */
+export async function verifyAttestation(payloadHash, cfg = config(), vault = cfg.vault, attesterId = null) {
   return callFunction("verifyAttestationState", {
-    contractAddress: vault, payloadHash, compiledArtifactRef: cfg.artifact,
+    contractAddress: vault, attesterId: attesterId || await attesterIdOf(cfg), payloadHash, compiledArtifactRef: cfg.artifact,
   }, cfg);
 }
 
@@ -305,27 +335,48 @@ export async function prepareDocumentProof(document, proofFields, cfg = config()
   };
 }
 
-/** Commit/reveal phase 0: commitment + secret nonce for a hidden payload. */
-export function prepareAnchorCommitment(sha256, metadataJson, cfg = config()) {
-  return callAction("prepareAnchorCommitment", { sha256, metadata: metadataJson }, cfg);
-}
+/**
+ * Prediction commitment. Lineage 4 (NIGHTGATE 0.24) removed the commit/reveal
+ * circuit and `prepareAnchorCommitment`: the morning commit is now a plain
+ * attest of sha256(payloadHash || nonce) over the two lowercase hex strings,
+ * the next morning's reveal a plain attest of the prediction envelope itself,
+ * and the nonce is published with the reveal. The commit's block time proves
+ * the call was made before the outcome; anyone re-hashes to check the binding.
+ */
+export const COMMIT_SCHEME = "sha256(payloadHashHex||nonceHex)/v1";
+export const predictionCommitment = (payloadHash, nonce) => sha256hex(`${String(payloadHash).toLowerCase()}${String(nonce).toLowerCase()}`);
+
+/** Vault calls that existed up to lineage 3 and are gone in lineage 4: queue items with them are dropped, not built. */
+export const LEGACY_CALLS = new Set(["attestCommit", "attestReveal", "attestGuarded"]);
 
 // ---------- local build (caller half of cross-server fee sponsoring) ----------
 
 let builderPromise = null;
 let callsModule = null;
+let txModule = null;
+
+/** The nightgate-tx modules (txbuilder, calls, the vault artifact), loaded once. */
+export async function loadTxModules(cfg = config()) {
+  if (!callsModule || !txModule) {
+    const [tx, calls] = await Promise.all([
+      import("@odatano/nightgate-tx/txbuilder"),
+      import("@odatano/nightgate-tx/calls"),
+    ]);
+    txModule = tx;
+    callsModule = calls;
+  }
+  return { tx: txModule, calls: callsModule };
+}
 
 async function getBuilder(cfg) {
   if (!builderPromise) {
     builderPromise = (async () => {
-      const [{ createTxBuilder }, calls, vault] = await Promise.all([
-        import("@odatano/nightgate-tx/txbuilder"),
-        import("@odatano/nightgate-tx/calls"),
+      const [{ tx }, vault] = await Promise.all([
+        loadTxModules(cfg),
         cfg.artifact === "attestation-vault-32"
           ? import("@odatano/nightgate-tx/attestation-vault-32")
           : import("@odatano/nightgate-tx/attestation-vault"),
       ]);
-      callsModule = calls;
       const opts = {
         seedHex: cfg.seedHex,
         networkId: cfg.network,
@@ -344,52 +395,50 @@ async function getBuilder(cfg) {
         opts.provingMode = "server";
         opts.proofServerUrl = cfg.proofServerUrl;
       }
-      return createTxBuilder(opts);
+      return tx.createTxBuilder(opts);
     })();
     builderPromise.catch(() => { builderPromise = null; });
   }
   return builderPromise;
 }
 
-/** Map a queue item's flat params onto the typed prepare* helper. */
-function prepareCall(item, secret, slotWidth) {
+/**
+ * Map a queue item's flat params onto the typed prepare* helper (nightgate-tx
+ * 0.6 / lineage 4). The queue format stays lineage-free: claims still carry
+ * payloadHash(A/B); the record keys the circuits take are derived here from
+ * M₳X' attesterId. `validUntil` (UNIX s) is optional, the helper defaults to
+ * one year. Exported for offline wiring tests (after loadTxModules()).
+ */
+export function prepareCall(item, secret, slotWidth, attesterId) {
   const c = callsModule;
   const p = item.params;
+  const rk = (payloadHash) => txModule.computeRecordKey(attesterId, payloadHash);
+  const validUntil = p.validUntil != null ? BigInt(p.validUntil) : undefined;
   switch (item.call) {
     case "attest":
       return c.prepareAttest({ payloadHash: p.payloadHash, metadataHash: p.metadataHash, attestationSecret: secret });
     case "anchorContentRoot":
       return c.prepareAnchorContentRoot({ payloadHash: p.payloadHash, contentRoot: p.contentRoot, schemaId: p.schemaId, attestationSecret: secret });
-    case "attestCommit":
-      // lineage 3 (nightgate-tx 0.5): a commit expires; the reveal must land before
-      // expiresAt (UNIX s, > 1 min and <= 7 d ahead). Legacy queue items without
-      // one get the default window at build time.
-      return c.prepareAttestCommit({ commitment: p.commitment, expiresAt: p.expiresAt || commitExpiresAt(), attestationSecret: secret });
-    case "attestReveal":
-      return c.prepareAttestReveal({ payloadHash: p.payloadHash, metadataHash: p.metadataHash, nonce: p.nonce, attestationSecret: secret });
     case "proveFieldPredicate":
       return c.prepareProveFieldPredicate({
-        payloadHash: p.payloadHash, fieldKey: p.fieldKey, threshold: BigInt(p.threshold), op: BigInt(p.op),
+        recordKey: rk(p.payloadHash), fieldKey: p.fieldKey, threshold: BigInt(p.threshold), op: BigInt(p.op), validUntil,
         merkleProof: item.merkleProof, attestationSecret: secret, slotWidth,
       });
     case "proveFieldsUnchangedExcept":
       return c.prepareProveFieldsUnchangedExcept({
-        payloadHashA: p.payloadHashA, payloadHashB: p.payloadHashB, allowedMask: Number(p.allowedMask),
+        recordKeyA: rk(p.payloadHashA), recordKeyB: rk(p.payloadHashB), allowedMask: Number(p.allowedMask), validUntil,
         docPair: item.docPair, attestationSecret: secret, slotWidth,
       });
     case "proveFieldsDiffer":
       return c.prepareProveFieldsDiffer({
-        payloadHashA: p.payloadHashA, payloadHashB: p.payloadHashB, k: Number(p.k),
+        recordKeyA: rk(p.payloadHashA), recordKeyB: rk(p.payloadHashB), k: Number(p.k), validUntil,
         docPair: item.docPair, attestationSecret: secret, slotWidth,
       });
     default:
+      if (LEGACY_CALLS.has(item.call)) throw new Error(`call ${item.call} does not exist on a lineage-4 vault (NIGHTGATE 0.24 / nightgate-tx 0.6)`);
       throw new Error(`unknown call ${item.call}`);
   }
 }
-
-/** Commit expiry for a daily prediction (revealed next morning): now + 36 h, UNIX seconds. */
-export const COMMIT_WINDOW_H = 36;
-export const commitExpiresAt = (hours = COMMIT_WINDOW_H) => Math.floor(Date.now() / 1000) + hours * 3600;
 
 /**
  * Build + prove + sign several queued plain attests as ONE transaction (one
@@ -401,7 +450,7 @@ export async function buildSponsorableBatch(items, cfg = config()) {
   const slotWidth = cfg.artifact === "attestation-vault-32" ? 32 : 16;
   const vault = items[0].vault || cfg.vault;
   if (items.some((i) => i.call !== "attest" || (i.vault || cfg.vault) !== vault)) throw new Error("batch: only plain attests on one vault");
-  const calls = items.map((i) => prepareCall(i, b.attestationSecret, slotWidth));
+  const calls = items.map((i) => prepareCall(i, b.attestationSecret, slotWidth, String(b.attesterId)));
   const t0 = Date.now();
   const built = await b.buildSponsorable({ contractAddress: vault, calls, bind: false });
   log(`built+proved batch of ${items.length} attests in ${Math.round((Date.now() - t0) / 1000)}s`);
@@ -417,7 +466,7 @@ export async function buildSponsorableBatch(items, cfg = config()) {
 export async function buildSponsorable(item, cfg = config()) {
   const b = await getBuilder(cfg);
   const slotWidth = cfg.artifact === "attestation-vault-32" ? 32 : 16;
-  const call = prepareCall(item, b.attestationSecret, slotWidth);
+  const call = prepareCall(item, b.attestationSecret, slotWidth, String(b.attesterId));
   const t0 = Date.now();
   const built = await b.buildSponsorable({ contractAddress: item.vault || cfg.vault, call, bind: false });
   log(`built+proved ${item.call} in ${Math.round((Date.now() - t0) / 1000)}s`);
@@ -574,8 +623,14 @@ export function latest(kind) {
   return history().filter((a) => a.ok && (!kind || a.kind === kind)).at(-1) || null;
 }
 
-export function alreadyAttested(payloadHash) {
-  return history().some((a) => a.ok && a.payloadHash === payloadHash);
+/**
+ * Is this payload already attested ON THE CURRENT VAULT? Vault-aware since the
+ * lineage-4 switch (15.09.2026): a payload that landed on the previous vault is
+ * not there for proofs on the new one, so the daily run and the worker must
+ * attest it again instead of skipping it.
+ */
+export function alreadyAttested(payloadHash, vault = config().vault) {
+  return history().some((a) => a.ok && a.payloadHash === payloadHash && (a.vault || "") === vault);
 }
 
 /**

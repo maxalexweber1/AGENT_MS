@@ -48,7 +48,13 @@ const csv = (v, def) => new Set(String(v ?? def).split(",").map((s) => s.trim())
 export const SKIP_SKILLS = csv(process.env.MCITY_QUEST_SKIP_SKILLS, "bounty_hunting,combat,defence,ranged,vitality");
 export const SKIP_SOURCES = csv(process.env.MCITY_QUEST_SKIP_SOURCES, "crypto_terminal");
 export const GRIND = process.env.MCITY_QUEST_GRIND !== "0";
-export const MAX_GATHERS = Number(process.env.MCITY_QUEST_MAX_GATHERS || 40);
+// 40 ended every run after ~8 minutes (14.09.2026: quest mode got 1-2.5 h a day despite weight 33)
+export const MAX_GATHERS = Number(process.env.MCITY_QUEST_MAX_GATHERS || 150);
+// gathers per run a rare-drop lottery may take before the grind goes by XP value. The lottery
+// sources regenerate, so "lottery first" without a cap took EVERY grind gather from 11.09. on:
+// 2,035 gathers at drone_wreckfield for a 2.5 % shot at an 83-XP contract, zero at the canal,
+// zero crafts, daily XP from +197k (10.09.) down to +12-53k
+export const LOTTERY_GATHERS = Number(process.env.MCITY_QUEST_LOTTERY_GATHERS ?? 5);
 const MAIN_SKILL = process.env.MCITY_SKILL || "hacking"; // level-ups there are progress.mjs's job
 const NODE_BUSY = /reserved|busy|depleted|regenerat|no available|occupied|in use|another agent/i;
 const stateFile = path.join(dataDir, "quest.json");
@@ -475,27 +481,44 @@ async function craftAll({ onTick, deadline }) {
  * fishing XP plus 39 cooking XP per fish and per eel at the kitchen), then the
  * lowest-XP skill first so every skill gets its share.
  */
+export function grindValue(s, recipes) {
+  return s.xp + (recipes || []).filter((r) => r.usable && r.inputs.length === 1 && s.outputs.some((o) => o.itemId === r.inputs[0].itemId)).reduce((a, r) => a + r.xp, 0);
+}
+
+/**
+ * Order of the grind's sources. A rare-drop lottery goes first only while it
+ * has used fewer than `lotteryGathers` gathers in this run; after that the
+ * sources rank by XP value (gather XP plus the single-input recipes their
+ * yield feeds), then the lowest skill, then distance. Pure, for tests.
+ */
+export function grindOrder(sources, { recipes = [], prog = {}, lotteryUsed = 0, lotteryGathers = LOTTERY_GATHERS, bad = new Set() } = {}) {
+  const xpOf = (s) => Number(prog.skills?.[s]?.xp || 0);
+  const wanted = (s) => (lotteryUsed < lotteryGathers && s.wantedRare?.length ? 1 : 0);
+  return sources.filter((s) => !bad.has(s.sourceId))
+    .sort((a, b) => wanted(b) - wanted(a) || grindValue(b, recipes) - grindValue(a, recipes) || xpOf(a.skill) - xpOf(b.skill) || (a.nodes[0]?.distance ?? 9e9) - (b.nodes[0]?.distance ?? 9e9));
+}
+
+/** Returns { gathers, xp } - the gather XP the run earned (crafts count separately). */
 async function grind({ sources, recipes, prog, deadline, budget, onTick }) {
   const xpOf = (s) => Number(prog.skills?.[s]?.xp || 0);
-  const value = (s) => s.xp + (recipes || []).filter((r) => r.usable && r.inputs.length === 1 && s.outputs.some((o) => o.itemId === r.inputs[0].itemId)).reduce((a, r) => a + r.xp, 0);
-  let done = 0;
+  let done = 0, xp = 0, lotteryUsed = 0;
   const bad = new Set();
-  // sources a blocked contract's rare drop comes from go first: a node gives
-  // 5 gathers before it depletes, so each run buys ~5 tickets per lottery
-  const wanted = (s) => (s.wantedRare?.length ? 1 : 0);
+  const perSource = {};
   while (done < budget && Date.now() < deadline) {
-    const order = sources.filter((s) => !bad.has(s.sourceId))
-      .sort((a, b) => wanted(b) - wanted(a) || value(b) - value(a) || xpOf(a.skill) - xpOf(b.skill) || (a.nodes[0]?.distance ?? 9e9) - (b.nodes[0]?.distance ?? 9e9));
-    const src = order[0];
+    const src = grindOrder(sources, { recipes, prog, lotteryUsed, bad })[0];
     if (!src) break;
     const r = await gatherOnce(src, onTick);
     if (!r.ok) { bad.add(src.sourceId); log(`grind: ${src.sourceId} out (${r.reason})`); continue; }
     done++;
+    xp += src.xp;
+    perSource[src.sourceId] = (perSource[src.sourceId] || 0) + 1;
+    if (src.wantedRare?.length) lotteryUsed++;
     prog.skills[src.skill] = { ...(prog.skills[src.skill] || {}), xp: xpOf(src.skill) + src.xp };
     await upkeep(onTick);
     await sleep(2_000);
   }
-  return done;
+  if (done) log(`grind: ${Object.entries(perSource).map(([k, n]) => `${n}x ${k}`).join(", ")} (+${xp} gather XP)`);
+  return { gathers: done, xp };
 }
 
 // ---------- the run ----------
@@ -598,9 +621,11 @@ export async function runOnce({ onTick = null, maxMs = 90 * 60_000, maxGathers =
   }
 
   if (GRIND && Date.now() < deadline && done.gathers < maxGathers && p2.sources.length) {
-    const n = await grind({ sources: p2.sources, recipes: p2.recipes, prog, deadline, budget: maxGathers - done.gathers, onTick });
-    log(`${label}: grind ${n} gather(s)`);
-    done.gathers += n;
+    const g = await grind({ sources: p2.sources, recipes: p2.recipes, prog, deadline, budget: maxGathers - done.gathers, onTick });
+    log(`${label}: grind ${g.gathers} gather(s)`);
+    done.gathers += g.gathers;
+    // before 15.09.2026 the summary counted only contracts and crafts and read "+0 XP" for a full grind
+    done.xp += g.xp;
   }
 
   // workstations: turn what the bag holds into crafted goods (and XP), then

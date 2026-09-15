@@ -157,6 +157,10 @@ export async function runOnce({ onTick = null, maxMs = 25 * 60_000 } = {}) {
   let nextRelocate = Date.now() + cfg.relocateEveryMs;
   let lastMeal = Date.now();
   let moves = 0;
+  // why pitches did not happen (13.09.2026: 13 people in reach, 0 pitches, nothing in the log)
+  const skips = {};
+  let nextSkipLog = Date.now() + 5 * 60_000;
+  const skipSummary = () => Object.entries(skips).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ×${n}`).join(", ");
   while (Date.now() < deadline) {
     await tick();
     if (Date.now() >= nextPitch) {
@@ -165,6 +169,11 @@ export async function runOnce({ onTick = null, maxMs = 25 * 60_000 } = {}) {
       try {
         ok = await social.maybeInitiate({ pitch: true, maxDistance: cfg.maxDistance, pitchGapMs: cfg.pitchGapMs, pitchCooldownMs: cfg.pitchCooldownMs, maxPitchesPerDay: cfg.maxPitchesPerDay, minutesLeft, place });
       } catch (e) { log("hustle: pitch failed:", e.message); }
+      if (!ok) {
+        const why = (social.lastSkipReason() || "unknown").replace(/\(.*$/, (m) => m.length > 70 ? m.slice(0, 70) + "…)" : m);
+        skips[why] = (skips[why] || 0) + 1;
+        if (Date.now() >= nextSkipLog) { nextSkipLog = Date.now() + 5 * 60_000; log(`hustle: no pitch so far - ${skipSummary()}`); }
+      }
       nextPitch = Date.now() + (ok ? cfg.pitchGapMs : 30_000);
     }
     if (Date.now() - lastMeal > 180_000) {
@@ -200,11 +209,11 @@ export async function runOnce({ onTick = null, maxMs = 25 * 60_000 } = {}) {
   const minutes = Math.round((Date.now() - startedAt) / 60_000);
   const r = { place, pitches, quotes, paid, income, minutes };
   const st = load();
-  st.runs.push({ at: startedAt, ...r });
+  st.runs.push({ at: startedAt, ...r, skips });
   save();
-  journal.note("hustle", r);
+  journal.note("hustle", { ...r, skips });
   nightgate.enqueueDoc("hustle", { date: new Date().toISOString().slice(0, 10), ts: Date.now(), place, pitches, quotes, paid, minutes });
-  log(`hustle: done at ${place} - ${pitches} pitches, ${quotes} quotes, ${paid} paid (+${income} crystal) in ${minutes} min`);
+  log(`hustle: done at ${place} - ${pitches} pitches, ${quotes} quotes, ${paid} paid (+${income} crystal) in ${minutes} min${Object.keys(skips).length ? ` - skipped: ${skipSummary()}` : ""}`);
   return r;
 }
 

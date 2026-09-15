@@ -250,7 +250,16 @@ export function classifyPitchReply(text) {
   const low = t.toLowerCase();
   if (!t) return "other";
   if (/\b(no thanks|no,? thank|not interested|nah\b|i'?ll pass|hard pass|leave me|not now|maybe later|don'?t need|no need|stop\b|go away|not for me|i'?m good|no crystal|can'?t afford|waste of)/i.test(low)
-    || /^(no|nope|nah)[.! ]*$/i.test(low)) return "refuse";
+    || /^(no|nope|nah)[.! ]*$/i.test(low)
+    // an explicit "I won't pay" is a no, however politely it is wrapped (13.09.2026: "I'm not sending
+    // crystals for a hash" was read as a claim and answered with a price quote)
+    || /\b(not|never|won'?t|don'?t|ain'?t|no way i'?m)\s+(gonna |going to )?(send|sending|pay|paying|spend|spending|buy|buying|transfer|transferring)\b/i.test(low)) return "refuse";
+  // talk ABOUT the offer (its price, the hash, the chain, what they need first) is an objection or a
+  // question, never a line to anchor - the old claim rule fired on any first-person sentence
+  // (crystal, price, fee are NOT in here: "made 2000 crystal today, price was 18" is exactly the kind of line people anchor)
+  const aboutTheDeal = /\b(hash|hashed|hashing|anchor|anchoring|anchored|notar\w*|receipt|on.?chain|midnight|pay|paying|payment|sending you|send you|sha256|proof|proofs|your offer|the offer|the deal)\b/i;
+  const objection = /\b(show me|prove (it|that|this)|first\b|before (i|we)|unless|if you (can|could|show|prove)|what'?s the (catch|point)|just noise|don'?t (bet|trust|see|buy)|not convinced|why would i|data source|source first|verify (the|that|this) claim)\b/i;
+  if (objection.test(low)) return "question";
   const agreeOnly = /^(ok|okay|sure|deal|yes|yeah|yep|fine|alright|sounds good|let'?s do it|go ahead|i'?m in|why not|do it|count me in)[.! ]*(then|please)?[.! ]*$/i.test(low)
     || (low.length < 60 && /\b(sure|deal|ok|okay|yes|yeah|let'?s do it|go ahead|i'?m in|count me in|do it)\b/.test(low) && !/\?/.test(low) && !/\b(i|i'?ve|i'?m|my|we|our)\b.*\b(sold|mined|made|earned|caught|built|crafted|won|finished|delivered|found|traded|beat|got)\b/.test(low));
   if (agreeOnly) return "agree";
@@ -259,8 +268,10 @@ export function classifyPitchReply(text) {
   const claim = sentences.some((s) =>
     !/\?$/.test(s) && s.split(/\s+/).length >= 4 &&
     (/\b(i|i'?ve|i'?m|i'?d|we|we'?ve|my|our|me)\b/i.test(s) || /\d/.test(s)) &&
+    !aboutTheDeal.test(s) && !/\b(i'?d|would|could|might|if\b)/i.test(s) &&
     !/\b(what|how|why|which|who|where|when|cost|price|explain|mean)\b/i.test(s.split(/\s+/).slice(0, 2).join(" ")));
   if (claim) return "claim";
+  if (aboutTheDeal.test(low)) return "question";
   if (/\?|\b(what|how|why|which|who|cost|price|explain|prove|scam|trust|catch|worth|expensive|cheaper|free|what'?s in it)\b/i.test(low)) return "question";
   return "other";
 }

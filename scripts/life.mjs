@@ -465,6 +465,34 @@ function chooseMode() {
 }
 
 // ---------- main ----------
+
+/**
+ * Connect to the agent, waiting out a Midnight City outage IN PROCESS.
+ * 15.09.2026 ~19:40 UTC the observer answered 502 for 10+ minutes: `claimable`
+ * failed, main() died with "fatal", Docker restarted the container every ~35 s
+ * (20+ restarts) and the detached anchor worker was killed with each restart
+ * before its first proof finished - no anchor landed although NIGHTGATE was
+ * fine. Anchoring does not need the game, so the process now stays up (the
+ * worker keeps draining the queue) and retries with a growing pause.
+ */
+async function connectWithBackoff() {
+  const waits = [30_000, 60_000, 120_000, 300_000];
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await connect();
+    } catch (e) {
+      const waitMs = waits[Math.min(attempt - 1, waits.length - 1)];
+      const why = String(e.message || e).split("\n")[0].slice(0, 160);
+      state.lastError = `${new Date().toISOString()} connect: ${why}`;
+      saveState();
+      log(`connect failed (attempt ${attempt}): ${why} - Midnight City unreachable? retrying in ${Math.round(waitMs / 1000)}s, anchoring keeps running`);
+      // a worker that drained the queue meanwhile is not re-kicked by game hooks (the game is down)
+      try { if (nightgate.readQueue().length && !nightgate.workerActive()) nightgate.kickWorker(); } catch { /* optional */ }
+      await sleep(waitMs);
+    }
+  }
+}
+
 async function main() {
   loadState();
   mem.load();
@@ -473,7 +501,7 @@ async function main() {
   nightgate.clearStaleLock();
   const llmOk = await llm.init();
   log(`life: llm ${llmOk ? `on (${llm.MODEL}, budget ${llm.DAILY_BUDGET_USD} USD/day)` : "off - " + llm.status().disabledReason}; sleep ${process.env.MCITY_SLEEP_START || "02:30"}-${process.env.MCITY_SLEEP_END || "05:00"}; weights ${JSON.stringify(cfg.weights)}`);
-  await connect();
+  await connectWithBackoff();
   await catalog.ensure(); // static content once per process (contracts, sources, items)
   refreshLive(true);
   log(`status: ${live.coins} meme_coin, ${live.crystal} crystal, hunger ${live.hunger}, at ${live.place}`);

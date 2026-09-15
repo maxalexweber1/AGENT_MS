@@ -103,7 +103,7 @@ function saveInflight(itemId, inflight) {
 
 const idempotencyKey = (idKey, attempt, salt) => `${idKey}-${attempt}${salt ? `-${salt}` : ""}`;
 
-const ATTEST_CALLS = new Set(["attest", "anchorContentRoot", "attestReveal"]);
+const ATTEST_CALLS = new Set(["attest", "anchorContentRoot"]);
 // job states NIGHTGATE will not move on by itself. `reconciliation_required`
 // (0.23+) = broadcast, outcome ambiguous: only chain evidence resolves it, and
 // a broadcast that never reaches a block stays there for good - so the worker
@@ -122,7 +122,7 @@ async function idle(ms) {
   }
 }
 // calls that leave a payload attestation the indexer can be asked about
-const PAYLOAD_CALLS = new Set(["attest", "attestReveal"]);
+const PAYLOAD_CALLS = new Set(["attest"]);
 // calls that only make sense once the payload (and its content root) is on chain
 const DEPENDENT_CALLS = new Set(["anchorContentRoot", "proveFieldPredicate", "proveFieldEquality", "proveFieldMembership", "proveFieldsDiffer", "proveDocumentComparison"]);
 
@@ -288,6 +288,18 @@ function recordSkipped(item, reason) {
   log(`${item.id} ${item.kind}/${item.call}: SKIPPED - ${reason}`);
 }
 
+/**
+ * Drop a queue item whose vault call no longer exists (lineage-3 commit/reveal
+ * after the move to lineage 4). Recorded as skipped so the dashboard and the
+ * counters see it; never built, never paid for.
+ */
+function recordDropped(item) {
+  const error = `dropped: ${item.call} does not exist on a lineage-4 vault (NIGHTGATE 0.24 / nightgate-tx 0.6)`;
+  ng.record({ ok: false, ...baseEntry(item), status: "skipped", skipped: true, error });
+  journal.note("attest", { kind: item.kind, call: item.call, ok: false, skipped: true, payloadHash: item.params?.payloadHash, network: cfg.network, error });
+  log(`${item.id} ${item.kind}/${item.call}: DROPPED - lineage-3 call`);
+}
+
 // ---------- one transaction ----------
 
 /**
@@ -433,6 +445,20 @@ function nextGroup(queue) {
   return group;
 }
 
+/** Regenerate reports/dashboard.html (public proof ledger). Never throws. */
+const DASHBOARD_EVERY_MS = Number(process.env.NIGHTGATE_DASHBOARD_EVERY_MIN ?? 10) * 60_000;
+let lastDashboardAt = Date.now();
+async function refreshDashboard() {
+  lastDashboardAt = Date.now();
+  try {
+    const { execFileSync } = await import("node:child_process");
+    const { scriptsDir } = await import("./lib/mc.mjs");
+    const path = await import("node:path");
+    execFileSync(process.execPath, [path.join(scriptsDir, "dashboard.mjs")], { stdio: "ignore", timeout: 120_000 });
+    log("dashboard refreshed");
+  } catch (e) { log("dashboard refresh failed:", e.message); }
+}
+
 /** payloadHash -> why nothing depending on it can succeed in this run */
 const blocked = new Map();
 function noteFailed(item) {
@@ -460,6 +486,12 @@ export async function drain() {
       if (until) { log(`anchoring paused until ${new Date(until).toISOString()} - worker stops, ${ng.readQueue().length} item(s) stay queued`); break; }
       const queue = ng.readQueue();
       if (!queue.length) break;
+      if (ng.LEGACY_CALLS.has(queue[0].call)) {
+        recordDropped(queue[0]);
+        ng.writeQueue(ng.readQueue().filter((q) => q.id !== queue[0].id));
+        ng.touchLock();
+        continue;
+      }
       const group = nextGroup(queue);
       let done = [group[0]];
       const missing = dependsOn(group[0]).find((h) => blocked.has(h));
@@ -525,19 +557,14 @@ export async function drain() {
       ng.writeQueue(ng.readQueue().filter((q) => !ids.has(q.id)));
       ng.touchLock();
       n += done.length;
+      // a worker that never drains never reached the refresh above: 14.09.-15.09.2026 the
+      // public page stood still for 15 h while anchors kept landing
+      if (Date.now() - lastDashboardAt >= DASHBOARD_EVERY_MS) await refreshDashboard();
       if (n >= 80) { log("worker: 80 items in one run - stopping, will be re-kicked"); break; }
     }
     log(`worker done (${n} item${n === 1 ? "" : "s"})`);
     // keep the public ledger fresh: regenerate after every drained batch
-    if (n > 0) {
-      try {
-        const { execFileSync } = await import("node:child_process");
-        const { scriptsDir } = await import("./lib/mc.mjs");
-        const path = await import("node:path");
-        execFileSync(process.execPath, [path.join(scriptsDir, "dashboard.mjs")], { stdio: "ignore" });
-        log("dashboard refreshed");
-      } catch (e) { log("dashboard refresh failed:", e.message); }
-    }
+    if (n > 0) await refreshDashboard();
   } finally {
     clearInterval(heartbeat);
     ng.releaseLock();

@@ -123,33 +123,36 @@ export function plan({ sinceMs = 0, cfg = ng.config() } = {}) {
  * Returns a candidate, a reason string (not retried) or null (already fine).
  */
 function predictionRetry(a, preds, okAttest, okCommit, queuedCommit, cfg) {
-  const nowS = Math.floor(Date.now() / 1000);
-  if (a.call === "attestReveal" || a.kind === "prediction-reveal") {
+  // lineage 4 (NIGHTGATE 0.24): commit and reveal are plain attests (ng.COMMIT_SCHEME);
+  // anything committed through the old attestGuarded circuit cannot be finished any more
+  if (a.kind === "prediction-reveal" || a.call === "attestReveal") {
     const p = preds.find((x) => x.payloadHash && x.payloadHash === a.payloadHash);
     if (!p) return "prediction reveal without a matching entry in predictions.json";
     if (okAttest.has(p.payloadHash)) return null;
     if (p.voided) return `prediction ${p.date} is voided (${p.voided.slice(0, 50)})`;
+    if (p.scheme !== ng.COMMIT_SCHEME) return `prediction ${p.date} was committed with the lineage-3 circuit - no reveal path on lineage 4`;
     if (p.vault && p.vault !== cfg.vault) return `prediction ${p.date} was committed on vault ${ng.shortHash(p.vault)} (previous lineage)`;
-    if (p.expiresAt && nowS >= p.expiresAt - 600) return `prediction ${p.date}: commitment expired ${new Date(p.expiresAt * 1000).toISOString()} - reveal impossible`;
     if (!okCommit.has(p.commitment)) return `prediction ${p.date}: its commit never landed - nothing to reveal against`;
     return {
-      entry: a, kind: "prediction-reveal", call: "attestReveal", key: p.payloadHash,
-      params: { payloadHash: p.payloadHash, metadataHash: p.metadataHash, nonce: p.nonce },
+      entry: a, kind: "prediction-reveal", call: "attest", key: p.payloadHash,
+      params: { payloadHash: p.payloadHash, metadataHash: p.metadataHash },
       doc: p.prediction, vault: p.vault, metaExtra: { kind: "prediction", date: p.date },
-      note: `reveal of the ${p.date} prediction, window open until ${new Date(p.expiresAt * 1000).toISOString().slice(0, 16)}`,
+      note: `reveal of the ${p.date} prediction`,
     };
   }
-  const p = preds.find((x) => x.commitment && x.commitment === a.commitment);
+  const p = preds.find((x) => x.commitment && x.commitment === (a.commitment || a.payloadHash));
   if (!p) return "prediction commit without a matching entry in predictions.json";
   if (okCommit.has(p.commitment)) return null;
   if (queuedCommit.has(p.commitment)) return "commit already queued";
   if (p.voided) return `prediction ${p.date} is voided`;
+  if (p.scheme !== ng.COMMIT_SCHEME) return `prediction ${p.date} used the lineage-3 commit circuit - not retried on lineage 4`;
   if (p.vault && p.vault !== cfg.vault) return `prediction ${p.date} belongs to vault ${ng.shortHash(p.vault)} (previous lineage)`;
-  // the commit only makes sense while the reveal (next morning) can still follow
-  if (p.expiresAt && nowS >= p.expiresAt - 6 * 3600) return `prediction ${p.date}: commitment window (until ${new Date(p.expiresAt * 1000).toISOString()}) too short for a reveal tomorrow`;
+  // a commit landing after its day has started to play out proves nothing
+  if (p.date !== today()) return `prediction ${p.date}: a commit made after that day began proves nothing - not retried`;
   return {
-    entry: a, kind: "prediction-commit", call: "attestCommit", key: p.commitment,
-    params: { commitment: p.commitment, expiresAt: p.expiresAt }, metaExtra: { date: p.date },
+    entry: a, kind: "prediction-commit", call: "attest", key: p.commitment,
+    params: { payloadHash: p.commitment, metadataHash: ng.sha256hex(JSON.stringify({ v: SCHEMA_VERSION, agentId: ng.AGENT_ID, kind: "prediction-commit", date: p.date })), commitment: p.commitment },
+    metaExtra: { date: p.date },
     note: `commit of the ${p.date} prediction (still hidden; the reveal tomorrow proves it was made before the outcome)`,
   };
 }

@@ -1,6 +1,6 @@
 /**
  * Work: meme-coin batches at the hacker house, selling, eating.
- * Ported from farm.mjs; every wait calls `onTick` so conversations keep flowing.
+ * Ported from the former standalone farm script; every wait calls `onTick` so conversations keep flowing.
  */
 
 import { run, tryRun, action, log, sleep, waitIdle, getInventory, getNeeds, keepAlive, LEASE_ERROR, connect, lease } from "./mc.mjs";

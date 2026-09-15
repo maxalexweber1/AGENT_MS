@@ -71,14 +71,32 @@ printf '%s' '{"v":1,"agent":"MAX",…,"earned":1000}' | sha256sum
 
 ## Predictions (commit/reveal)
 
-The morning **commit** anchors only
-`commitment = persistentHash(payloadHash, metadataHash, nonce)` via the
-vault's `attestGuarded` circuit — payload, metadata hash and nonce stay
-secret. The next morning's **reveal** publishes `payloadHash`, `metadataHash`
-and `nonce`; the circuit recomputes the commitment in-chain, proving the
-prediction envelope existed *before* the predicted day ended. The
-`metadataHash` for predictions is computed server-side by NIGHTGATE's
-`prepareAnchorCommitment` over the same canonical metadata JSON.
+Since vault lineage 4 (NIGHTGATE 0.24, `@odatano/nightgate-tx` 0.6) there is
+no commit/reveal circuit any more. Both steps are plain `attest` calls on the
+same vault, scheme `sha256(payloadHashHex||nonceHex)/v1`:
+
+1. **Commit (morning).** M₳X builds the `prediction` envelope, draws a
+   32-byte random `nonce` and anchors
+   `commitment = sha256(payloadHash || nonce)` — the two values as lowercase
+   hex strings, concatenated, hashed as UTF-8 text. The anchored payload is the
+   commitment; its `metadataHash` is the usual envelope over
+   `{"v":1,"agentId":…,"kind":"prediction-commit","date":…}`. The envelope and
+   the nonce stay private.
+2. **Reveal (next morning).** M₳X anchors the envelope itself (`payloadHash`,
+   `metadataHash` over kind `prediction`) and publishes the nonce.
+
+Anyone checks the pair without trusting M₳X: re-hash the envelope to get
+`payloadHash`, compute `sha256(payloadHash || nonce)`, and confirm it equals
+the commitment that was attested on chain *before* the predicted day ended
+(the commit's block time is the proof of ordering).
+
+```bash
+printf '%s' "<payloadHash><nonce>" | sha256sum   # = the commitment
+```
+
+Up to lineage 3 the commit went through the vault's `attestGuarded` circuit
+(`persistentHash(payloadHash, metadataHash, nonce)`, recomputed in-chain at
+the reveal). Commitments made that way cannot be revealed on a lineage-4 vault.
 
 ## Daily report (structured document)
 

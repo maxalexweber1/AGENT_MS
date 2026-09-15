@@ -15,9 +15,11 @@
  *   3. queue: milestone predicate "crystal >= <largest round milestone>"
  *      (ZK - the actual number stays hidden)
  *   4. reveal yesterday's prediction commit, then commit a fresh prediction
- *      for today (attestGuarded commit/reveal - provably made BEFORE the outcome;
- *      lineage 3: a commit is bound to its committer and EXPIRES - the reveal
- *      must land within COMMIT_WINDOW_H, and only on the vault the commit hit)
+ *      for today - provably made BEFORE the outcome. Lineage 4 has no
+ *      commit/reveal circuit: the commit is a plain attest of
+ *      sha256(payloadHash || nonce), the reveal a plain attest of the envelope
+ *      on the same vault, and the nonce is published with the reveal
+ *      (ng.COMMIT_SCHEME). Lineage-3 commits cannot be revealed any more.
  *   5. drain the anchor queue (strictly serial, see anchor-worker.mjs)
  */
 
@@ -164,27 +166,28 @@ async function daily() {
     log(`queued ZK claim: >= ${DIFF_MIN_FIELDS} report fields differ between ${prevDate} and ${date}`);
   }
 
-  // 4. predictions: reveal yesterday's commit, then commit today's
+  // 4. predictions: reveal yesterday's commit, then commit today's.
+  // Lineage 4 (NIGHTGATE 0.24) has no commit/reveal circuit: both steps are plain
+  // attests (ng.COMMIT_SCHEME) - commit = sha256(payloadHash || nonce), reveal =
+  // the envelope's own payloadHash; the nonce is published with the reveal.
   const preds = readPredictions();
-  const nowS = Math.floor(Date.now() / 1000);
   for (const p of preds) {
     if (p.revealed || p.voided || !(p.date < date)) continue;
     if (!ng.history().some((a) => a.ok && a.commitment === p.commitment)) continue;
-    // a reveal must hit the vault the commit landed on. Commits on a previous
-    // vault (lineage 2, before the 0.5.0 migration) cannot be revealed any more.
+    // a reveal must sit on the vault the commit landed on, and use the same scheme
     if (p.vault !== cfg.vault) {
       p.voided = `commit lives on vault ${ng.shortHash(p.vault || "?")} (previous lineage) - not revealable after the vault migration`;
       log(`prediction ${p.date} voided: ${p.voided}`);
       continue;
     }
-    if (p.expiresAt && nowS >= p.expiresAt) {
-      p.voided = `commitment expired ${new Date(p.expiresAt * 1000).toISOString()} before the reveal`;
+    if (p.scheme !== ng.COMMIT_SCHEME) {
+      p.voided = `committed with the lineage-3 attestGuarded circuit, which lineage 4 no longer has`;
       log(`prediction ${p.date} voided: ${p.voided}`);
       continue;
     }
     ng.enqueue({
-      kind: "prediction-reveal", call: "attestReveal",
-      params: { payloadHash: p.payloadHash, metadataHash: p.metadataHash, nonce: p.nonce },
+      kind: "prediction-reveal", call: "attest",
+      params: { payloadHash: p.payloadHash, metadataHash: p.metadataHash },
       doc: p.prediction, meta: { kind: "prediction", date: p.date },
       vault: p.vault,
     }, { kick: false });
@@ -202,18 +205,22 @@ async function daily() {
     const batches = journal.since(Date.now() - 72 * 3600_000).filter((e) => e.type === "batch");
     const perDay = batches.reduce((a, e) => a + (e.sold || 0), 0) / 3;
     const predictedCoins = Math.min(2000, Math.max(50, Math.round(perDay / 10) * 10)) || 300;
-    // canonical prediction/v1 envelope (docs/SCHEMAS.md); the commitment binds
-    // the payloadHash + the SERVER-computed metadataHash over metaJson
+    // canonical prediction/v1 envelope (docs/SCHEMAS.md); the commitment hides it
+    // behind a fresh 32-byte nonce that stays in predictions.json until the reveal
     const can = canonical("prediction", { predictedCoins }, { agentId: ng.AGENT_ID, date });
     const prediction = can.envelope;
     const payloadHash = can.payloadHash;
-    const c = await ng.prepareAnchorCommitment(payloadHash, can.metaJson, cfg);
-    // the commit expires (lineage 3): tomorrow morning's reveal has 36 h, the
-    // server's own suggestion (c.expiresAt, now + 24 h) is too tight for a late run
-    const expiresAt = ng.commitExpiresAt();
-    preds.push({ date, prediction, payloadHash, metadataHash: c.metadataHash, nonce: c.nonce, commitment: c.commitment, expiresAt, vault: cfg.vault, revealed: false });
-    ng.enqueue({ kind: "prediction-commit", call: "attestCommit", params: { commitment: c.commitment, expiresAt }, meta: { date } }, { kick: false });
-    log(`committing today's prediction (hidden until tomorrow, expires ${new Date(expiresAt * 1000).toISOString()}): ${predictedCoins} coins`);
+    const { randomBytes } = await import("node:crypto");
+    const nonce = randomBytes(32).toString("hex");
+    const commitment = ng.predictionCommitment(payloadHash, nonce);
+    const commitMeta = { v: 1, agentId: ng.AGENT_ID, kind: "prediction-commit", date };
+    preds.push({ date, prediction, payloadHash, metadataHash: can.metadataHash, nonce, commitment, scheme: ng.COMMIT_SCHEME, vault: cfg.vault, revealed: false });
+    ng.enqueue({
+      kind: "prediction-commit", call: "attest",
+      params: { payloadHash: commitment, metadataHash: ng.sha256hex(JSON.stringify(commitMeta)), commitment },
+      meta: commitMeta,
+    }, { kick: false });
+    log(`committing today's prediction (hidden until tomorrow): ${predictedCoins} coins`);
   }
   writePredictions(preds);
 
