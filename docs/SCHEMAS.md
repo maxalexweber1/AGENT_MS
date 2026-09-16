@@ -52,6 +52,7 @@ stay in sync with it.
 | `craft` | `recipeId`, `skill`, `xp`, `batches` | one craft action at a workstation (recipe id, the skill it trains, XP granted for all batches, batches made) |
 | `quest` | `contracts`, `xp`, `gathers` | one contract run across all skills (since 2026-09-07): contracts delivered, XP earned incl. gathering, gathers made; each delivered contract is also anchored as its own `contract` |
 | `hustle` | `place`, `pitches`, `quotes`, `paid`, `minutes` | one notary sales run (since 2026-09-11): the area id M₳X worked, pitches delivered, quotes given (price + claim hash), anchors paid for out of those pitches, minutes spent; each paid anchor is also anchored as its own `notary-paid` |
+| `gathers` | `gathers`, `xp`, `sources` | every 25 resource gathers (since 2026-09-16): how many, the gather XP they earned, and the sources worked as `sourceId:count` pairs sorted by count, comma-separated (e.g. `canal_eddy:23,drone_wreckfield:2`) |
 
 ### Worked example (`batch`)
 
@@ -115,6 +116,29 @@ replies, openers, conversations, explores
 and `reportSha256` (sha256 of the rendered markdown report). This is what
 zero-knowledge claims like *"crystal ≥ 100000"* are proven against
 (`proveFieldPredicate`), without revealing the value.
+
+## Daily progress (structured document, since 2026-09-16)
+
+A second structured document per day, built the same way (NIGHTGATE's
+`prepareDocumentProof`, anchored with `attest` + `anchorContentRoot`), over
+M₳X's skill progression and public leaderboard standing. Ordered proof fields,
+never to be reordered:
+
+```
+xpTotal,
+xp_agility, xp_bounty_hunting, xp_chemistry, xp_combat, xp_cooking,
+xp_crafting, xp_defence, xp_energy, xp_engineering, xp_farming, xp_fishing,
+xp_hacking, xp_infiltration, xp_mining, xp_ranged, xp_scavenging,
+xp_smithing, xp_vitality, xp_woodcutting,
+contractsCompleted, rankExperience, rankContracts, rankRichest, rankMostLiked
+```
+
+(all `uint`, scale 1; a rank of 0 means "not ranked"), inside a document that
+also carries `date` and `agentId`. Daily claims proven against it, values
+hidden: total XP ≥ a round 100k step, each of the three strongest skills at
+least at its current level (its XP ≥ the level's threshold from the game's
+XP table), completed contracts ≥ a step of 5, and experience rank ≤ the next
+multiple of 50.
 
 ## Verifying an anchor
 

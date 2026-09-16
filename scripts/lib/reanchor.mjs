@@ -34,7 +34,8 @@ import { SCHEMAS, SCHEMA_VERSION } from "./schemas.mjs";
 
 const today = () => new Date().toISOString().slice(0, 10);
 const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10);
-const isReportKind = (k) => k === "report" || k === "report-root" || k === "report-diff" || !!k?.startsWith("predicate:");
+// the daily progress document (since 2026-09-16) is repaired by the same daily run as the report
+const isReportKind = (k) => k === "report" || k === "report-root" || k === "report-diff" || k === "progress" || k === "progress-root" || !!k?.startsWith("predicate:");
 const isPredictionKind = (k) => k === "prediction-commit" || k === "prediction-reveal";
 
 /** metadataHash of a mini-doc attest: same envelope canonical() hashes (docs/SCHEMAS.md). */

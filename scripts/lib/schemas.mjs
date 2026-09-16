@@ -47,6 +47,9 @@ export const SCHEMAS = {
   craft: ["recipeId", "skill", "xp", "batches"],
   // one notary sales run (hustle.mjs, since 2026-09-11): where, pitches made, quotes given, anchors paid, minutes spent
   hustle: ["place", "pitches", "quotes", "paid", "minutes"],
+  // every NIGHTGATE_GATHER_ANCHOR_EVERY (25) resource gathers (quest.mjs, since 2026-09-16): how many,
+  // gather XP earned, and "sourceId:count" pairs sorted by count, comma-separated
+  gathers: ["gathers", "xp", "sources"],
 };
 
 /** Metadata envelope (hashed into metadataHash), same for every kind. */

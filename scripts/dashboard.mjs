@@ -29,6 +29,7 @@ const KIND_LABEL = {
   "prediction-reveal": "prediction reveal", "grant-test": "system check",
   pulse: "hourly pulse", meal: "meal", sleep: "sleep", "report-diff": "zk claim: reports differ",
   contract: "contract delivered", levelup: "level up", tool: "tool secured", quest: "contract run", craft: "crafted", "notary-paid": "notary (paid)",
+  progress: "daily progress", "progress-root": "progress root", gathers: "gathers",
 };
 const kindLabel = (k) => KIND_LABEL[k] || (k?.startsWith("predicate:") ? `zk claim: ${k.slice(10)}` : k || "attest");
 
@@ -348,10 +349,10 @@ const GROUPS = [
 function groupOf(kind) {
   if (!kind) return "other";
   if (["batch", "meeting", "explore", "pulse", "meal", "sleep"].includes(kind)) return "activity";
-  if (kind === "report" || kind === "report-root" || kind === "report-diff" || kind.startsWith("predicate:")) return "proofs";
+  if (kind === "report" || kind === "report-root" || kind === "report-diff" || kind === "progress" || kind === "progress-root" || kind.startsWith("predicate:")) return "proofs";
   if (kind.startsWith("prediction-")) return "predictions";
   if (kind === "notary" || kind === "notary-paid") return "notary";
-  if (["contract", "levelup", "tool", "quest", "craft", "hustle"].includes(kind)) return "progression";
+  if (["contract", "levelup", "tool", "quest", "craft", "hustle", "gathers"].includes(kind)) return "progression";
   return "other";
 }
 

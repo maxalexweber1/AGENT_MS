@@ -332,6 +332,29 @@ async function upkeep(onTick) {
  * One gather at one source. Tries up to 3 nodes when a node is taken.
  * Returns { ok, itemId, quantity } or { ok: false, reason }.
  */
+/**
+ * Gather anchors (since 2026-09-16): every NIGHTGATE_GATHER_ANCHOR_EVERY (25,
+ * 0 = off) successful gathers become one `gathers` attest - count, gather XP and
+ * the sources worked, so the grind itself is provable, not only the contract
+ * runs around it. A window left unfinished carries over to the next run in this
+ * process (a restart drops at most 24 gathers from the anchors, never from the
+ * journal).
+ */
+const GATHER_ANCHOR_EVERY = Number(process.env.NIGHTGATE_GATHER_ANCHOR_EVERY ?? 25);
+const gatherWindow = { n: 0, xp: 0, sources: {} };
+function noteGatherForAnchor(src) {
+  if (!(GATHER_ANCHOR_EVERY > 0)) return;
+  gatherWindow.n++;
+  gatherWindow.xp += Number(src.xp || 0);
+  gatherWindow.sources[src.sourceId] = (gatherWindow.sources[src.sourceId] || 0) + 1;
+  if (gatherWindow.n < GATHER_ANCHOR_EVERY) return;
+  const sources = Object.entries(gatherWindow.sources).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k, v]) => `${k}:${v}`).join(",");
+  nightgate.enqueueDoc("gathers", { date: today(), ts: Date.now(), gathers: gatherWindow.n, xp: gatherWindow.xp, sources });
+  gatherWindow.n = 0;
+  gatherWindow.xp = 0;
+  gatherWindow.sources = {};
+}
+
 export async function gatherOnce(src, onTick) {
   const tried = new Set();
   let nodes = src.nodes;
@@ -364,6 +387,7 @@ export async function gatherOnce(src, onTick) {
     const got = o.itemId ? { itemId: o.itemId, quantity: Number(o.quantity || 1) } : null;
     log(`gather ${src.sourceId} @ ${node.id}: ${o.status}${got ? `, +${got.quantity} ${got.itemId}` : ""} (+${src.xp} ${src.skill} XP)`);
     journal.note("gather", { sourceId: src.sourceId, nodeId: node.id, skill: src.skill, xp: src.xp, itemId: got?.itemId || null, quantity: got?.quantity || null });
+    noteGatherForAnchor(src);
     return { ok: true, ...got };
   }
   return { ok: false, reason: "all nodes taken" };

@@ -26,8 +26,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadDotEnv, dataDir, scriptsDir, log } from "./lib/mc.mjs";
+import { loadDotEnv, dataDir, scriptsDir, log, run } from "./lib/mc.mjs";
 import * as journal from "./lib/journal.mjs";
+import * as catalog from "./lib/catalog.mjs";
 import * as report from "./lib/report.mjs";
 import * as ng from "./lib/nightgate.mjs";
 import { canonical } from "./lib/schemas.mjs";
@@ -45,8 +46,14 @@ const MILESTONES = [1_000_000, 500_000, 250_000, 100_000, 50_000, 25_000, 10_000
 const EXTRA_PREDICATES = [
   { field: "coinsSold", step: 100 },
   { field: "replies", step: 50 },
-  { field: "conversations", step: 50 },
+  // step 10 since 2026-09-16: with 50 the claim rounded to 0 and was skipped on quieter days
+  { field: "conversations", step: 10 },
   { field: "batches", step: 5 },
+  // since 2026-09-16: claims over the report fields that had none
+  { field: "crystalFromCoins", step: 500 },
+  { field: "openers", step: 5 },
+  { field: "meals", step: 1 },
+  { field: "explores", step: 1 },
 ];
 // daily cross-report diff: at least this many of the 9 fields differ from yesterday (0 = off)
 const DIFF_MIN_FIELDS = Number(process.env.NIGHTGATE_DIFF_MIN_FIELDS ?? 3);
@@ -56,6 +63,94 @@ export function planPredicates(document, plan = EXTRA_PREDICATES) {
   return plan
     .map(({ field, step }) => ({ field, threshold: Math.floor((Number(document[field]) || 0) / step) * step }))
     .filter((p) => p.threshold > 0);
+}
+
+// ---------- daily progress document (since 2026-09-16) ----------
+// A second structured document per day over skill XP and leaderboard standing,
+// anchored like the report (attest + content root) with ZK claims on top.
+/** ORDERED and STABLE (tree identity, docs/SCHEMAS.md). Never reorder. */
+const PROGRESS_SKILLS = ["agility", "bounty_hunting", "chemistry", "combat", "cooking", "crafting", "defence", "energy", "engineering", "farming", "fishing", "hacking", "infiltration", "mining", "ranged", "scavenging", "smithing", "vitality", "woodcutting"];
+export const PROGRESS_FIELDS = ["xpTotal", ...PROGRESS_SKILLS.map((s) => `xp_${s}`), "contractsCompleted", "rankExperience", "rankContracts", "rankRichest", "rankMostLiked"];
+const progressDir = () => path.join(dataDir, "doc-proofs-progress");
+function readProgressProof(date) {
+  try { return JSON.parse(fs.readFileSync(path.join(progressDir(), `${date}.json`), "utf8")); } catch { return null; }
+}
+
+/** Public leaderboard ranks of M₳X (0 = not ranked or leaderboard unreachable). */
+async function leaderboardRanks() {
+  const zero = { rankExperience: 0, rankContracts: 0, rankRichest: 0, rankMostLiked: 0 };
+  const base = String(process.env.MCITY_OBSERVER_URL || "https://midnight.city/observer").replace(/\/+$/, "");
+  try {
+    const res = await fetch(`${base}/api/leaderboards?agentIds=${encodeURIComponent(ng.AGENT_ID)}`, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    const rank = (board) => Math.max(0, Math.round(Number(j.requestedAgents?.[board]?.[0]?.entry?.rank || 0)));
+    return { rankExperience: rank("experience"), rankContracts: rank("completedContracts"), rankRichest: rank("richest"), rankMostLiked: rank("mostLiked") };
+  } catch (e) {
+    log(`leaderboard unavailable (${e.message}) - ranks recorded as 0`);
+    return zero;
+  }
+}
+
+/** Build today's progress document from `progression --all` and the leaderboards. */
+export async function buildProgressDocument(date = today()) {
+  const prog = run("progression", ng.AGENT_ID, "--all");
+  const skills = prog.skills || {};
+  const xp = (s) => Math.max(0, Math.round(Number(skills[s]?.xp || 0)));
+  const document = { date, agentId: ng.AGENT_ID, xpTotal: PROGRESS_SKILLS.reduce((a, s) => a + xp(s), 0) };
+  for (const s of PROGRESS_SKILLS) document[`xp_${s}`] = xp(s);
+  document.contractsCompleted = (prog.completedContractIds || []).length;
+  Object.assign(document, await leaderboardRanks());
+  return document;
+}
+
+/**
+ * Claims over a progress document (pure). thresholds = gameContent.xpThresholds
+ * (index = level - 1). op 1 = ">=", 0 = "<=".
+ */
+export function planProgressClaims(document, thresholds = []) {
+  const claims = [];
+  const total = Math.floor((Number(document.xpTotal) || 0) / 100_000) * 100_000;
+  if (total > 0) claims.push({ field: "xpTotal", op: 1, threshold: total, note: "total XP" });
+  const levelOf = (x) => { let l = 1; for (let i = 0; i < thresholds.length; i++) if (x >= Number(thresholds[i])) l = i + 1; return l; };
+  const top = PROGRESS_SKILLS.map((s) => ({ s, x: Number(document[`xp_${s}`]) || 0 })).sort((a, b) => b.x - a.x).slice(0, 3);
+  for (const { s, x } of top) {
+    const level = levelOf(x);
+    const floor = Number(thresholds[level - 1]) || 0;
+    if (level >= 2 && floor > 0) claims.push({ field: `xp_${s}`, op: 1, threshold: floor, note: `${s} level >= ${level}` });
+  }
+  const contracts = Math.floor((Number(document.contractsCompleted) || 0) / 5) * 5;
+  if (contracts > 0) claims.push({ field: "contractsCompleted", op: 1, threshold: contracts, note: "completed contracts" });
+  const rank = Number(document.rankExperience) || 0;
+  if (rank > 0) claims.push({ field: "rankExperience", op: 0, threshold: Math.ceil(rank / 50) * 50, note: "experience leaderboard rank" });
+  return claims;
+}
+
+/** Prepare (once per day), anchor and claim the progress document. Never throws into daily(). */
+async function dailyProgress(date) {
+  let dp = readProgressProof(date);
+  if (!dp) {
+    const document = await buildProgressDocument(date);
+    const prepared = await ng.prepareDocumentProof(document, PROGRESS_FIELDS.map((f) => ({ field: f, kind: "uint", scale: 1 })), cfg);
+    dp = { date, document, ...prepared };
+    fs.mkdirSync(progressDir(), { recursive: true });
+    fs.writeFileSync(path.join(progressDir(), `${date}.json`), JSON.stringify(dp, null, 1));
+    log(`progress document prepared: payloadHash ${dp.payloadHash} (xpTotal ${document.xpTotal}, experience rank ${document.rankExperience || "-"})`);
+  } else {
+    log(`progress document for ${date} already prepared - reusing`);
+  }
+  const meta = { v: 1, agentId: ng.AGENT_ID, kind: "daily-progress", date };
+  if (!ng.alreadyAttested(dp.payloadHash)) {
+    ng.enqueue({ kind: "progress", call: "attest", params: { payloadHash: dp.payloadHash, metadataHash: ng.sha256hex(JSON.stringify(meta)) }, meta }, { kick: false });
+    ng.enqueue({ kind: "progress-root", call: "anchorContentRoot", params: { payloadHash: dp.payloadHash, contentRoot: dp.contentRoot, schemaId: dp.schemaId }, meta }, { kick: false });
+  }
+  let thresholds = [];
+  try { await catalog.ensure(); thresholds = catalog.gameContent()?.xpThresholds || []; } catch (e) { log(`catalog unavailable (${e.message}) - no level claims today`); }
+  for (const c of planProgressClaims(dp.document, thresholds)) {
+    if (ng.history().some((a) => a.ok && a.kind === `predicate:${c.field}` && a.date === date)) continue;
+    enqueuePredicate(dp, c.field, c.op, c.threshold, { kick: false });
+    log(`queued ZK claim: ${c.field} ${c.op ? ">=" : "<="} ${c.threshold} (${c.note}; real value stays hidden)`);
+  }
 }
 
 function readDocProof(date) {
@@ -165,6 +260,9 @@ async function daily() {
     }, { kick: false });
     log(`queued ZK claim: >= ${DIFF_MIN_FIELDS} report fields differ between ${prevDate} and ${date}`);
   }
+
+  // 3d. the daily progress document: skill XP + leaderboard standing, root and claims
+  try { await dailyProgress(date); } catch (e) { log("daily progress document failed:", e.message); }
 
   // 4. predictions: reveal yesterday's commit, then commit today's.
   // Lineage 4 (NIGHTGATE 0.24) has no commit/reveal circuit: both steps are plain
