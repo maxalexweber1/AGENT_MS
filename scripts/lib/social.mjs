@@ -216,7 +216,7 @@ async function answerThread(t, otherId) {
     }
   } else if (notary.openOrders().some((o) => o.claimantId === otherId) && paidWords.test(latest)) {
     // "sent" - look right now instead of on the next 20 s check
-    try { if (await notary.checkPayments({ force: true })) notaryReceipt = notary.takePendingReceipt(otherId); } catch (e) { log("notary check failed:", e.message); }
+    try { if (await notary.checkPayments({ force: true, claimantId: otherId })) notaryReceipt = notary.takePendingReceipt(otherId); } catch (e) { log("notary check failed:", e.message); }
     if (!notaryReceipt) notaryQuote = notary.openOrders().find((o) => o.claimantId === otherId) || null;
   } else if (pitchThread && !notaryReceipt) {
     // the deal flow: what did the pitched agent just say?

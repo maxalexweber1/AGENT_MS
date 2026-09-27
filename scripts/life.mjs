@@ -647,7 +647,8 @@ process.on("unhandledRejection", (e) => log("unhandled rejection:", e?.message |
       } else {
         const until = nightgate.pausedUntil();
         const st = nightgate.stats();
-        console.log(`anchoring: ${until ? `PAUSED until ${new Date(until).toISOString()}` : "active"}`);
+        const why = until ? nightgate.pauseInfo()?.reason : "";
+        console.log(`anchoring: ${until ? `PAUSED until ${new Date(until).toISOString()}${why ? ` - ${why}` : ""}` : "active"}`);
         console.log(`queue: ${nightgate.readQueue().length} item(s), worker ${nightgate.workerActive() ? "running" : "idle"}`);
         console.log(`lifetime: ${st.ok} ok, ${st.failed} failed (${st.feeWasted || 0} refused on chain with the fee burned, ${st.apiOutage || 0} lost to API outages, ${st.reanchored || 0} re-anchored later)`);
         const tail = nightgate.workerLogTail(3);

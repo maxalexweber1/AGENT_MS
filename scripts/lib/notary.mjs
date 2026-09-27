@@ -10,7 +10,13 @@
  *
  * Payment detection runs from tick() while orders are open: the recent-events
  * feed (crystal_transferred with M₳X as recipient) first, the crystal balance
- * as a fallback when nothing else moved the balance in the last 90 s.
+ * as a fallback. The fallback is the normal case - a transfer does not show up
+ * in the recipient's feed - and it is the dangerous one, because M₳X's own coin
+ * sales raise the same balance. It booked 19 phantom payments before
+ * 2026-09-21; judgeBalance() now holds every rise back until it is sure (an
+ * announced own move via purse.mjs, a late journal event, an implausible amount
+ * and a cap of one quote per rise). A missed payment costs a receipt; an
+ * invented one puts a lie on chain.
  * Threads close ~60 s after the last message, so orders live in
  * data/notary-orders.json for 24 h: a late payment still gets its anchor and
  * the receipt is delivered in the next conversation with that agent (or by a
@@ -23,6 +29,7 @@ import path from "node:path";
 import { tryRun, action, lease, log, dataDir, getInventory } from "./mc.mjs";
 import * as journal from "./journal.mjs";
 import * as nightgate from "./nightgate.mjs";
+import * as purse from "./purse.mjs";
 
 export const cfg = {
   price: Number(process.env.MCITY_NOTARY_PRICE ?? 10),
@@ -31,7 +38,18 @@ export const cfg = {
   orderTtlMs: 24 * 3600_000,
   checkEveryMs: 20_000,
   balanceQuietMs: 90_000,
+  // a rise is never booked on the spot: it has to survive this long unexplained
+  // (our own sale is journaled 20-35 s after the money lands - see purse.mjs)
+  confirmMs: Number(process.env.MCITY_NOTARY_CONFIRM_MS || 120_000),
+  // how many open quotes one unexplained rise may ever settle (a 400 crystal
+  // sale once settled seven of them in 104 ms)
+  maxCreditsPerRise: Number(process.env.MCITY_NOTARY_MAX_CREDITS_PER_RISE || 1),
 };
+/** A payment looks like the price, not like a coin batch. */
+const maxPlausibleRise = () => Number(process.env.MCITY_NOTARY_MAX_RISE || cfg.price * cfg.maxCreditsPerRise * 2);
+
+/** Journal events that mean the balance moved because of something M₳X did. */
+const OWN_EVENTS = ["batch", "meal", "tool", "contract", "notary-paid"];
 
 const file = path.join(dataDir, "notary-orders.json");
 
@@ -169,14 +187,74 @@ async function deliverReceipt(order) {
 let lastCheck = 0;
 let lastBalance = null;
 let lastBalanceAt = 0;
+/** A rise that is waiting to be explained: { at, delta, balance, claimantId } */
+let pendingRise = null;
+
+/**
+ * The decision the old code got wrong, as a pure function - no clock, no files,
+ * no network, so the 2026-09-21 incident can be replayed by hand:
+ *   judgeBalance({ now: 0, crystal: 228138, lastBalance: 227738, pending: null,
+ *     ownMoveActive: true, ownMoveReason: "selling 100 meme_coin",
+ *     ownReasonFor: () => null, price: 10, confirmMs: 120000, maxRise: 20 })
+ *   → { kind: "ignore" }   (the old code booked seven payments here)
+ *
+ * Three independent guards, each of which alone would have stopped 2026-09-21:
+ *   1. an announced own move (purse.mjs) is never a payment
+ *   2. a rise is held for `confirmMs` and dropped if a reason turns up late
+ *      (our batch event is written 20-35 s after the money)
+ *   3. a rise far above the price is not a payment, whatever else says
+ *
+ * Returns { kind: "book" | "hold" | "drop" | "ignore" | "none", ... }.
+ */
+export function judgeBalance({ now, crystal, lastBalance, pending, ownMoveActive, ownMoveReason, ownReasonFor, price, confirmMs, maxRise }) {
+  if (pending) {
+    const ours = ownMoveActive ? `we announced "${ownMoveReason}"` : ownReasonFor(pending.at);
+    if (ours) return { kind: "drop", log: `the ${pending.delta} crystal rise was ours (${ours}) - no payment booked` };
+    if (now - pending.at < confirmMs) return { kind: "none" };
+    return { kind: "book", delta: pending.delta, claimantId: pending.claimantId || null, waitedS: Math.round((now - pending.at) / 1000) };
+  }
+  if (lastBalance == null || crystal <= lastBalance) return { kind: "none" };
+  const delta = crystal - lastBalance;
+  const ours = ownMoveActive ? `we announced "${ownMoveReason}"` : ownReasonFor(now);
+  if (ours) return { kind: "ignore", log: `+${delta} crystal, but ${ours} - not a payment` };
+  if (delta > maxRise) return { kind: "ignore", log: `+${delta} crystal is far above the ${price} crystal price - not a payment, ignoring` };
+  return { kind: "hold", delta };
+}
+
+/** Who a confirmed rise settles: whoever said they sent it, else oldest first. */
+export function ordersForRise(openQuotes, claimantId) {
+  return openQuotes.slice().sort((a, b) => {
+    if (claimantId) {
+      const ha = a.claimantId === claimantId ? 0 : 1;
+      const hb = b.claimantId === claimantId ? 0 : 1;
+      if (ha !== hb) return ha - hb;
+    }
+    return a.createdAt - b.createdAt;
+  });
+}
+
+/**
+ * Did something of ours move the balance around `sinceTs`? Returns the reason
+ * or null. Looks at both ends: an announcement made before the money arrived
+ * (purse.mjs) and a journal event written after it.
+ */
+function ownExplains(sinceTs) {
+  const from = sinceTs - cfg.balanceQuietMs;
+  const move = purse.lastOwnMove();
+  if (move.at >= from) return `we announced "${move.reason}"`;
+  const e = journal.since(from).find((x) => OWN_EVENTS.includes(x.type));
+  return e ? `our own ${e.type} at ${new Date(e.at).toISOString().slice(11, 19)}` : null;
+}
 
 /**
  * Look for payments on open orders. Cheap when nothing is open (one branch).
- * Called from tick(); `force` skips the 20 s throttle (someone just said "sent").
+ * Called from tick(); `force` skips the 20 s throttle (someone just said "sent"),
+ * `claimantId` names who said it, so a confirmed rise settles THAT order rather
+ * than the oldest one.
  */
-export async function checkPayments({ force = false } = {}) {
+export async function checkPayments({ force = false, claimantId = null } = {}) {
   const open = openOrders();
-  if (!open.length) { lastBalance = null; return 0; }
+  if (!open.length) { lastBalance = null; pendingRise = null; return 0; }
   if (!force && Date.now() - lastCheck < cfg.checkEveryMs) return 0;
   lastCheck = Date.now();
   const st = load();
@@ -200,22 +278,44 @@ export async function checkPayments({ force = false } = {}) {
     if (paid.length) save();
   }
 
-  // 2) balance fallback: the balance rose while nothing of ours moved it
+  // 2) balance fallback: the balance rose and nothing of ours explains it.
+  //    judgeBalance() below holds every rise back for cfg.confirmMs first,
+  //    because our own sale is journaled up to 35 s after the money lands.
   const stillOpen = open.filter((o) => o.status === "quoted");
   if (stillOpen.length) {
     const { crystal } = getInventory();
-    const ownMoves = journal.since(Date.now() - cfg.balanceQuietMs).some((e) => ["batch", "meal", "tool", "contract", "notary-paid"].includes(e.type));
-    if (lastBalance != null && !ownMoves && crystal > lastBalance) {
-      let delta = crystal - lastBalance;
-      for (const o of stillOpen.sort((a, b) => a.createdAt - b.createdAt)) {
-        if (delta < o.price) break;
-        paid.push(markPaid(o, o.price, "balance"));
+    const now = Date.now();
+    // "I sent it" arriving while a rise is on hold tells us whose it is
+    if (pendingRise && claimantId && !pendingRise.claimantId) pendingRise.claimantId = claimantId;
+
+    const verdict = judgeBalance({
+      now, crystal, lastBalance, pending: pendingRise, claimantId,
+      ownMoveActive: purse.ownMoveActive(now),
+      ownMoveReason: purse.lastOwnMove().reason,
+      ownReasonFor: ownExplains,
+      price: cfg.price, confirmMs: cfg.confirmMs, maxRise: maxPlausibleRise(),
+    });
+
+    if (verdict.kind === "book") {
+      let delta = verdict.delta;
+      for (const o of ordersForRise(stillOpen, verdict.claimantId)) {
+        if (paid.length >= cfg.maxCreditsPerRise || delta < o.price) break;
+        paid.push(markPaid(o, o.price, verdict.claimantId === o.claimantId ? "balance (they said they sent it)" : "balance"));
         delta -= o.price;
       }
-      if (delta > 0) log(`notary: ${delta} crystal arrived unattributed`);
+      if (!paid.length) log(`notary: ${verdict.delta} crystal stayed unattributed for ${verdict.waitedS}s but matches no open quote`);
+      else if (delta > 0) log(`notary: ${delta} crystal of that rise stayed unattributed (at most ${cfg.maxCreditsPerRise} quote(s) per rise)`);
+      pendingRise = null;
+    } else if (verdict.kind === "hold") {
+      pendingRise = { at: now, delta: verdict.delta, balance: crystal, claimantId: claimantId || null };
+      log(`notary: +${verdict.delta} crystal with no reason of ours - holding it for ${Math.round(cfg.confirmMs / 1000)}s before booking it as a payment`);
+    } else if (verdict.kind === "drop" || verdict.kind === "ignore") {
+      log(`notary: ${verdict.log}`);
+      if (verdict.kind === "drop") pendingRise = null;
     }
+
     lastBalance = crystal;
-    lastBalanceAt = Date.now();
+    lastBalanceAt = now;
   }
 
   for (const o of paid) await deliverReceipt(o);

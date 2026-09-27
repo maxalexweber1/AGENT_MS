@@ -43,6 +43,7 @@ import * as nightgate from "./nightgate.mjs";
 import * as report from "./report.mjs";
 import * as catalog from "./catalog.mjs";
 import { goTo, maybeEat } from "./work.mjs";
+import * as purse from "./purse.mjs";
 
 const csv = (v, def) => new Set(String(v ?? def).split(",").map((s) => s.trim()).filter(Boolean));
 export const SKIP_SKILLS = csv(process.env.MCITY_QUEST_SKIP_SKILLS, "bounty_hunting,combat,defence,ranged,vitality");
@@ -408,6 +409,7 @@ export async function deliverOne(c, onTick) {
   await waitIdle("before-contract", { onTick });
   const needs = c.requirements.map((x) => `${x.quantity} ${x.itemId}`).join(", ");
   log(`contract: delivering ${c.contractId} (${c.skill}${needs ? `, ${needs}` : ""})`);
+  purse.expectOwnMove(`contract ${c.contractId}`);
   const res = await action("deliver-contract", c.contractId);
   if (!res.ok) { log(`contract ${c.contractId} error: ${res.error}`); return false; }
   const o = res.data.outcome || {};

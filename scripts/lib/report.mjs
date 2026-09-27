@@ -35,6 +35,7 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
   const errors = by("error");
   const shouts = by("shout");
   const attests = by("attest");
+  const anchorHalts = by("anchor-halt");
   const xpPoints = by("xp").sort((a, b) => a.at - b.at);
   const levelups = by("levelup");
   const contracts = by("contract");
@@ -43,7 +44,10 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
   const gathers = by("gather");
   const crafts = by("craft");
   const skillPoints = by("skills").sort((a, b) => a.at - b.at);
-  const notaryPaid = by("notary-paid");
+  // a booking the balance fallback invented (2026-09-21) stays in the journal
+  // as a record, but it is not income and must not be reported as a sale
+  const notaryPaid = by("notary-paid").filter((e) => !e.voided);
+  const notaryVoided = by("notary-paid").filter((e) => e.voided);
   const notaryOrders = by("notary-order");
   const hustles = by("hustle");
   const pitches = openers.filter((e) => e.pitch);
@@ -76,6 +80,7 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
     explores: explores.map((e) => ({ district: e.district, note: e.note, at: e.at })),
     sleeps: sleeps.map((e) => ({ at: e.at, minutes: e.minutes })),
     modeTime, errors: errors.map((e) => ({ at: e.at, text: e.text })),
+    anchorHalts: anchorHalts.map((e) => ({ at: e.at, code: e.code, queued: e.queued })),
     attests: attests.map((e) => ({ at: e.at, ok: e.ok, kind: e.kind, payloadHash: e.payloadHash, txHash: e.txHash, network: e.network, error: e.error, feeWasted: !!e.feeWasted, attempt: e.attempt })),
     // progression: first/last XP snapshot in the window, level-ups, contracts, tools
     skill: xpPoints.length ? {
@@ -90,7 +95,7 @@ export function collect(windowMs = 24 * 3600_000, endMs = Date.now()) {
     gathers: gathers.reduce((m, e) => { m[e.skill] = (m[e.skill] || 0) + 1; return m; }, {}),
     crafts: crafts.map((e) => ({ at: e.at, recipeId: e.recipeId, skill: e.skill, xp: e.xp, batches: e.batches })),
     totalXp: skillPoints.length ? { start: skillPoints[0].total, end: skillPoints.at(-1).total, skills: Object.entries(skillPoints.at(-1).by || {}).filter(([, v]) => v > 0).length } : null,
-    notary: { paid: notaryPaid.length, income: notaryPaid.reduce((a, e) => a + (e.amount || 0), 0), free: notaryOrders.filter((e) => e.free).length, quoted: notaryOrders.filter((e) => !e.free).length },
+    notary: { voided: notaryVoided.length, paid: notaryPaid.length, income: notaryPaid.reduce((a, e) => a + (e.amount || 0), 0), free: notaryOrders.filter((e) => e.free).length, quoted: notaryOrders.filter((e) => !e.free).length },
     // notary sales runs (hustle mode): pitches made, quotes and paid anchors that came out of a pitch
     hustle: { runs: hustles.length, minutes: hustles.reduce((a, e) => a + (e.minutes || 0), 0), pitches: pitches.length, quotes: notaryOrders.filter((e) => e.pitched && !e.free).length, paid: notaryPaid.filter((e) => e.pitched).length, income: notaryPaid.filter((e) => e.pitched).reduce((a, e) => a + (e.amount || 0), 0), places: [...new Set(hustles.map((e) => e.place).filter(Boolean))] },
     releases: [...new Map(releases.map((e) => [`${e.repo}@${e.tag}`, { at: e.at, repo: e.repo, tag: e.tag, line: e.line }])).values()],
@@ -133,6 +138,7 @@ export function render(d) {
     lines.push(`- All skills: ${d.totalXp.end} XP total (${delta >= 0 ? "+" : ""}${delta} in the window, ${d.totalXp.skills} skill${d.totalXp.skills === 1 ? "" : "s"} trained)`);
   }
   if (d.notary && (d.notary.paid || d.notary.free || d.notary.quoted)) lines.push(`- Notary: ${d.notary.free} free anchor${d.notary.free === 1 ? "" : "s"}, ${d.notary.quoted} quoted, ${d.notary.paid} paid → +${d.notary.income} crystal`);
+  if (d.notary?.voided) lines.push(`- Notary correction: ${d.notary.voided} booking${d.notary.voided === 1 ? "" : "s"} voided - never paid, the balance fallback had read M₳X's own coin sale as a payment`);
   if (d.hustle?.runs || d.hustle?.pitches) lines.push(`- Hustle: ${d.hustle.runs} run${d.hustle.runs === 1 ? "" : "s"} (${d.hustle.minutes} min${d.hustle.places.length ? `, ${d.hustle.places.join(", ")}` : ""}), ${d.hustle.pitches} pitches → ${d.hustle.quotes} quotes, ${d.hustle.paid} paid → +${d.hustle.income} crystal`);
   if (d.releases?.length) lines.push(`- Shipped: ${d.releases.map((r) => `${String(r.repo).replace(/^.*\//, "")} ${r.tag}`).join(", ")} (M₳X talks about it)`);
   const anchored = d.attests?.filter((a) => a.ok) || [];
@@ -147,6 +153,10 @@ export function render(d) {
   if (anchorFails.length) {
     const burned = anchorFails.filter((a) => a.feeWasted).length;
     lines.push(`- On-chain proofs failed: ${anchorFails.length}${burned ? ` (${burned} refused on chain with the sponsor fee burned, then rebuilt)` : ""} (last: ${anchorFails.at(-1).error || "?"})`);
+  }
+  if (d.anchorHalts?.length) {
+    const h = d.anchorHalts.at(-1);
+    lines.push(`- On-chain proofs HALTED: ${h.code} at ${fmtTime(h.at)} (${h.queued} queued, anchoring paused until the grant/sponsor policy is fixed)`);
   }
   const score = nightgate.scoreboard();
   if (score) lines.push(`- Prediction track record: ${score.evaluated} evaluated, ${score.within10} within 10%, avg error ${score.avgErrorPct}%${score.last ? ` (last: ${score.last.predicted} predicted vs ${score.last.actual} actual)` : ""}`);

@@ -112,6 +112,37 @@ export function isApiOutage(message) {
     .test(String(message || ""));
 }
 
+// NIGHTGATE >= 0.28 error codes a client may retry unchanged (mirrors RETRYABLE_ERROR_CODES
+// of @odatano/nightgate-tx 0.7, plus the job-level wallet-sync codes); compared normalised
+const RETRYABLE_CODES = new Set([
+  "RATE_LIMITED", "BAD_GATEWAY", "UNAVAILABLE", "ACCOUNT_KEY_UNAVAILABLE", "JOB_ADMISSION_BUSY",
+  "PROVER_KEYS_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "SPONSOR_POLICY_UNAVAILABLE", "SUBMIT_INTENT_TIMEOUT",
+  "WALLET_NOT_SYNCED", "WALLET_SYNCING", "WORKER_ROTATING", "NETWORKORTIMEOUT",
+]);
+// codes that no retry fixes: the grant or the sponsor policy has to change first
+const HALT_CODES = new Set(["AGENT_GRANT_REVOKED", "SPONSOR_POLICY_EMPTY"]);
+const normCode = (c) => String(c ?? "").trim().toUpperCase().replace(/-/g, "_");
+
+/** A thrown NIGHTGATE error that is worth retrying later: outage text, 429/5xx status or a retryable code. */
+export function isRetryableError(e) {
+  if (!e) return false;
+  if (e.retryable) return true;
+  if (RETRYABLE_CODES.has(normCode(e.code))) return true;
+  if ([429, 502, 503, 504].includes(Number(e.status))) return true;
+  return isApiOutage(e.message);
+}
+
+/** A failed job that never broadcast and failed for a retryable reason (wallet not at tip, timeouts). */
+export function isRetryableJob(job) {
+  return job?.status === "failed" && !job.txHash && RETRYABLE_CODES.has(normCode(job.errorCode));
+}
+
+/** The halt code (grant revoked, sponsor policy empty) carried by an error or job, else null. */
+export function haltCode(x) {
+  for (const c of [x?.code, x?.errorCode, x?.job?.errorCode]) if (HALT_CODES.has(normCode(c))) return normCode(c);
+  return null;
+}
+
 /** A failed log entry that NIGHTGATE being down (not the vault) explains - incl. jobs written off while still queued/running. */
 export function isOutageEntry(a) {
   if (!a || a.ok) return false;
@@ -202,7 +233,7 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
       // worker probes the indexer itself and rebuilds when nothing shows up.
       if (job.status === "reconciliation_required" && job.txHash) return job;
     } catch (e) {
-      if (!isApiOutage(e.message)) throw e;
+      if (!isRetryableError(e)) throw e;
       lastErr = e;
       log(`getJobStatus ${jobId.slice(0, 8)}: ${e.message.slice(0, 80)} - polling on`);
     }
@@ -800,11 +831,17 @@ export function pausedUntil() {
 }
 export const paused = () => pausedUntil() > 0;
 
+/** The active pause record ({ until, reason, at, code? }), or null. */
+export function pauseInfo() {
+  if (!pausedUntil()) return null;
+  try { return JSON.parse(fs.readFileSync(pauseFile, "utf8")); } catch { return null; }
+}
+
 /** Pause anchoring for `minutes`: keep enqueuing, start no worker, stop a running one after its item. */
-export function pause(minutes, reason = "") {
+export function pause(minutes, reason = "", extra = {}) {
   fs.mkdirSync(dataDir, { recursive: true });
   const until = Date.now() + Math.max(1, Number(minutes) || 30) * 60_000;
-  fs.writeFileSync(pauseFile, JSON.stringify({ until, reason, at: Date.now() }));
+  fs.writeFileSync(pauseFile, JSON.stringify({ until, reason, at: Date.now(), ...extra }));
   log(`nightgate: anchoring paused until ${new Date(until).toISOString()}${reason ? ` (${reason})` : ""}`);
   return until;
 }

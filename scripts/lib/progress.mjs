@@ -24,6 +24,7 @@ import * as nightgate from "./nightgate.mjs";
 import * as report from "./report.mjs";
 import { ensureInHackerHouse } from "./work.mjs";
 import * as catalog from "./catalog.mjs";
+import * as purse from "./purse.mjs";
 
 export const SKILL = process.env.MCITY_SKILL || "hacking";
 export const TOOL_GOAL = process.env.MCITY_TOOL_GOAL ?? "cinder_decoder";
@@ -149,6 +150,7 @@ export async function deliverContracts({ onTick = null, r = null } = {}) {
     else { log(`contract ${c.contractId} wants area ${c.areaId} - skipped`); continue; }
     await waitIdle("before-contract", { onTick });
     log(`contract: delivering ${c.contractId}${needs ? ` (${needs})` : ""}`);
+    purse.expectOwnMove(`contract ${c.contractId}`);
     const res = await action("deliver-contract", c.contractId);
     if (!res.ok) { log(`contract ${c.contractId} error: ${res.error}`); continue; }
     const o = res.data.outcome || {};
@@ -216,6 +218,7 @@ export async function maybeBuyTool({ onTick = null, r = null } = {}) {
   if (crystal < offer.cost) { log(`tool goal ${TOOL_GOAL}: ${offer.cost} crystal needed, have ${crystal}`); return false; }
   log(`tool goal: ${r.skill} level ${r.level} >= ${requiredLevel} - buying ${TOOL_GOAL} from "${offer.merchantName}" for ${offer.cost} ${offer.itemId}`);
   await waitIdle("before-tool", { onTick });
+  purse.expectOwnMove(`buying ${TOOL_GOAL}`);
   const res = await action("trade", offer.merchantName, offer.itemId, String(offer.cost));
   if (!res.ok) { log(`tool purchase failed: ${res.error}`); return false; }
   const o = res.data.outcome || {};

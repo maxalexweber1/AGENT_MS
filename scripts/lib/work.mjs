@@ -6,6 +6,7 @@
 import { run, tryRun, action, log, sleep, waitIdle, getInventory, getNeeds, keepAlive, LEASE_ERROR, connect, lease } from "./mc.mjs";
 import * as journal from "./journal.mjs";
 import * as nightgate from "./nightgate.mjs";
+import * as purse from "./purse.mjs";
 
 export const HACKER_SPACE = "hacker-house-interior";
 const COIN = "meme_coin";
@@ -144,6 +145,7 @@ export async function maybeEat({ threshold = EAT_AT_HUNGER, onTick = null } = {}
     if (crystal < offer.cost) { log(`not enough crystal (${crystal}) for ${offer.food}`); return false; }
     await waitIdle("before-buy-food", { onTick });
     log(`buying 1 ${offer.food} from "${offer.merchantName}" for ${offer.cost} crystal`);
+    purse.expectOwnMove(`buying ${offer.food}`);
     const r = await action("trade", offer.merchantName, offer.itemId, String(offer.cost));
     if (!r.ok) { log("food trade failed:", r.error); return false; }
     if (r.data.outcome?.status === "failed") { log("food trade rejected:", r.data.outcome.reason || "unknown"); return false; }
@@ -195,6 +197,9 @@ export async function sellAll(onTick) {
   }
   const waited = Math.round((Date.now() - t0) / 1000);
   log(`selling ${qty} ${COIN} to "${offer.merchantName}" at ${pays ?? "?"} each${waited >= SELL_POLL_MS / 1000 ? ` after ${waited}s wait` : ""} (${crystal} crystal before)`);
+  // tell the notary before the money lands: its balance fallback must not read
+  // our own sale as a customer payment (purse.mjs)
+  purse.expectOwnMove(`selling ${qty} ${COIN}`);
   const r = await action("trade", offer.merchantName, offer.itemId, String(qty));
   if (!r.ok) throw new Error(`trade failed: ${r.error}`);
   const o = r.data.outcome || {};

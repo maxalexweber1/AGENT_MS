@@ -75,7 +75,7 @@ async function sponsorWithRetry(unboundTxB64, key) {
       return await ng.sponsorUnbound(unboundTxB64, key, cfg);
     } catch (e) {
       all500 = all500 && e.status === 500;
-      const transient = (e.status >= 500 || /fetch failed|ETIMEDOUT|ECONNRESET|timeout/i.test(e.message)) && t < 3;
+      const transient = (e.status >= 500 || ng.isRetryableError(e) || /timeout/i.test(e.message)) && !ng.haltCode(e) && t < 3;
       log(`sponsor submit failed (try ${t}): HTTP ${e.status || "?"} ${e.code || ""} ${e.message}`);
       if (!transient) {
         // three plain 500s in a row while the API answers: most likely the
@@ -323,7 +323,7 @@ async function submitWithRebuild(items, build, idKey) {
       // never build against a state that lacks the previous transaction
       await ng.awaitVisible(lastLanded, cfg);
       ({ unboundTxB64, attesterId } = await build());
-      inflight = { key: idKey, attempt, unboundTxB64, attesterId, builtAt: Date.now() };
+      inflight = { key: idKey, attempt, unboundTxB64, attesterId, builtAt: Date.now(), ...(inflight?.salt ? { salt: inflight.salt } : {}) };
       saveInflight(head.id, inflight);
     }
     if (inflight.jobId) {
@@ -345,6 +345,15 @@ async function submitWithRebuild(items, build, idKey) {
       log(`${items[0].id} ${items[0].kind}: job ${sub.jobId} still ${job.status} after 180s - waiting up to ${Math.round(cfg.lateLandWaitMs / 1000)}s more`);
       job = await ng.waitForJob(sub.jobId, sub.sessionId, { cfg, timeoutMs: cfg.lateLandWaitMs });
       if (!FINAL.has(job.status)) throw new Error(`NIGHTGATE job ${sub.jobId} still ${job.status} after ${Math.round((180_000 + cfg.lateLandWaitMs) / 1000)}s (API slow or down)`);
+    }
+    if (job.status === "failed" && !job.txHash && (ng.isRetryableJob(job) || ng.haltCode(job))) {
+      // nothing was broadcast (wallet not at tip, grant revoked, ...): the next pass
+      // builds again under a fresh key - this one belongs to the failed job
+      saveInflight(head.id, { key: idKey, attempt, salt: (inflight.salt || 0) + 1 });
+      const e = new Error(`NIGHTGATE job ${job.jobId} failed before broadcast: ${job.errorCode || "?"}: ${job.errorMessage || ""}`.slice(0, 300));
+      e.code = job.errorCode;
+      e.retryable = ng.isRetryableJob(job);
+      throw e;
     }
     if (isSubmitTimeout(job) || isAmbiguous(job)) job = await awaitLateLanding(items[0], job);
     outcome = { job, attesterId, attempt, ...(dropped ? { dropped } : {}) };
@@ -459,6 +468,25 @@ async function refreshDashboard() {
   } catch (e) { log("dashboard refresh failed:", e.message); }
 }
 
+/**
+ * Grant revoked or sponsor policy empty: no retry helps, so pause anchoring
+ * instead of writing the whole queue off, and tell the operator. The queue
+ * stays; `life.mjs anchors resume` drains it once the grant/policy is fixed.
+ */
+const HALT_PAUSE_MIN = Number(process.env.NIGHTGATE_HALT_PAUSE_MIN ?? 1440);
+async function haltAnchoring(code, message, item) {
+  const queued = ng.readQueue().length;
+  ng.pause(HALT_PAUSE_MIN, `${code}: ${message.slice(0, 160)}`, { code });
+  journal.note("anchor-halt", { code, kind: item.kind, call: item.call, queued, error: message.slice(0, 200) });
+  log(`${item.id} ${item.kind}: ${code} - anchoring paused for ${HALT_PAUSE_MIN} min, ${queued} item(s) stay queued`);
+  try {
+    const report = await import("./lib/report.mjs");
+    await report.notify(`M₳X anchoring halted: ${code}`, `${message.slice(0, 200)}
+${queued} anchor(s) queued. Fix the grant/sponsor policy, then: life.mjs anchors resume`);
+  } catch (e) { log("halt notify failed:", e.message); }
+  await refreshDashboard();
+}
+
 /** payloadHash -> why nothing depending on it can succeed in this run */
 const blocked = new Map();
 function noteFailed(item) {
@@ -518,7 +546,9 @@ export async function drain() {
         }
       } catch (e) {
         const item = group[0];
-        const outage = ng.isApiOutage(e.message);
+        const halt = ng.haltCode(e);
+        if (halt) { await haltAnchoring(halt, e.message, item); break; }
+        const outage = ng.isRetryableError(e);
         // a NIGHTGATE/API outage (5xx, timeouts, unreachable) is not the item's
         // fault: keep it at the head of the queue (order matters - a content
         // root must follow its attest) and back off, 1 min .. 30 min, up to

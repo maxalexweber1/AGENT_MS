@@ -87,6 +87,8 @@ function collect() {
     total: st.ok, todays: ok.filter((a) => a.date === today).length,
     failed: st.failed,
     feeWasted: st.feeWasted || 0,
+    // anchoring stopped on a grant/sponsor-policy error (the worker paused itself)
+    halt: (() => { const p = ng.pauseInfo(); return p?.code ? { code: p.code, at: p.at } : null; })(),
     skipped: st.skipped || 0,
     // the lifetime counters only know entries written since 2026-09-08; the
     // capped log is a floor for both numbers
@@ -466,6 +468,7 @@ export function renderBody() {
   .stat .hint { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
   .dim-inline { color: var(--ink-2); font-size: 15px; font-weight: 500; }
 
+  .halt-note { border: 1px solid color-mix(in srgb, var(--critical) 45%, transparent); color: var(--critical); border-radius: 12px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
     padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -664,6 +667,7 @@ export function renderBody() {
   <span class="net-badge">midnight ${esc(d.network)}</span>
 </header>
 <main class="container">
+  ${d.halt ? `<div class="halt-note" role="status">Anchoring is halted since ${esc(new Date(d.halt.at).toISOString().slice(0, 16).replace("T", " "))} UTC (${esc(d.halt.code)}). New anchors are queued and land once it is lifted.</div>` : ""}
   ${hero()}
   ${stats()}
   ${activity()}
