@@ -26,6 +26,7 @@ const FOOD_PRIORITY = ["fish", "meat", "to_go_food", "matcha_smoothie"];
 const SELL_MIN_PRICE = Number(process.env.MCITY_SELL_MIN_PRICE ?? 17);
 const SELL_WAIT_MAX_MS = Number(process.env.MCITY_SELL_WAIT_MAX_S ?? 240) * 1000;
 const SELL_POLL_MS = 10_000;
+const SELL_FLAT_POLLS = Number(process.env.MCITY_SELL_FLAT_POLLS ?? 3);
 
 const price = { pays: null, merchantName: null, at: 0, lo: null, hi: null };
 
@@ -188,12 +189,17 @@ export async function sellAll(onTick) {
   // sell on the upswing: the listed price is what the whole batch gets
   let pays = offer.pays;
   const t0 = Date.now();
+  let flat = 0;
   while (pays != null && pays < SELL_MIN_PRICE && Date.now() - t0 < SELL_WAIT_MAX_MS) {
     if (Date.now() - t0 < SELL_POLL_MS) log(`coin price ${pays} < ${SELL_MIN_PRICE} - waiting for the upswing (max ${Math.round(SELL_WAIT_MAX_MS / 1000)}s)`);
     if (onTick) { try { await onTick(); } catch (e) { log("tick error:", e.message); } }
     await sleep(SELL_POLL_MS);
     await keepAlive();
-    pays = coinPrice(0).pays ?? pays;
+    const next = coinPrice(0).pays ?? pays;
+    // no upswing to wait for: a price that is not climbing will not reach the threshold
+    flat = next > pays ? 0 : flat + 1;
+    pays = next;
+    if (flat >= SELL_FLAT_POLLS) { log(`coin price flat at ${pays} for ${flat * SELL_POLL_MS / 1000}s - not waiting longer`); break; }
   }
   const waited = Math.round((Date.now() - t0) / 1000);
   log(`selling ${qty} ${COIN} to "${offer.merchantName}" at ${pays ?? "?"} each${waited >= SELL_POLL_MS / 1000 ? ` after ${waited}s wait` : ""} (${crystal} crystal before)`);

@@ -108,7 +108,8 @@ export function config(env = process.env) {
  * them and the dashboard labels them as such.
  */
 export function isApiOutage(message) {
-  return /HTTP 5\d\d|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|TimeoutError|AbortError|Internal Server Error|Bad Gateway|Gateway Time-?out|Service Unavailable|API slow or down/i
+  // "Received status code 5xx" is how the indexer's GraphQL client words a 5xx inside the builder
+  return /HTTP 5\d\d|status code 5\d\d|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|TimeoutError|AbortError|Internal Server Error|Bad Gateway|Gateway Time-?out|Service Unavailable|API slow or down/i
     .test(String(message || ""));
 }
 
@@ -855,17 +856,32 @@ export function resume() {
 
 // ---------- worker lifecycle ----------
 
-/** True while a worker holds a fresh lock (touched after every item). */
+// In-process proving blocks the event loop (a report-diff proof runs ~20-30
+// min), so no heartbeat fires meanwhile: the lock's age says nothing about a
+// living worker. The pid decides; the age only catches a worker that hangs.
+const LOCK_MAX_AGE_MS = Number(process.env.NIGHTGATE_LOCK_MAX_AGE_MIN ?? 90) * 60_000;
+
+/** True while the worker named in the lock is alive (and the lock is not ancient). */
 export function workerActive() {
   try {
     const st = fs.statSync(lockFile);
-    return Date.now() - st.mtimeMs < 10 * 60_000;
+    if (Date.now() - st.mtimeMs > LOCK_MAX_AGE_MS) return false;
+    const pid = Number(fs.readFileSync(lockFile, "utf8").trim());
+    if (!(pid > 0)) return Date.now() - st.mtimeMs < 10 * 60_000;
+    if (pid === process.pid) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; }
   } catch { return false; }
 }
 
+/** Claims the lock; false when another worker took it first. */
 export function takeLock() {
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(lockFile, String(process.pid));
+  if (workerActive()) return false;
+  releaseLock();
+  try { fs.writeFileSync(lockFile, String(process.pid), { flag: "wx" }); return true; } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    throw e;
+  }
 }
 export function touchLock() {
   try { fs.utimesSync(lockFile, new Date(), new Date()); } catch { /* ignore */ }

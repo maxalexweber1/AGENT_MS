@@ -498,13 +498,11 @@ function noteFailed(item) {
 
 export async function drain() {
   if (!cfg.enabled) { log("nightgate not configured - worker exits"); return; }
-  if (ng.workerActive()) { log("another anchor worker is active - exiting"); return; }
-  ng.takeLock();
+  if (!ng.takeLock()) { log("another anchor worker is active - exiting"); return; }
   try { os.setPriority(19); } catch { /* not critical */ }
   seedLastLanded();
-  // keep the lock fresh WHILE proving too: a single proveFieldsDiffer took
-  // >11 min on 2026-09-08 and the lock (touched only between items) looked
-  // stale, inviting a second worker onto the same vault
+  // keeps the lock fresh between proofs; during a proof the event loop is
+  // blocked and the lock's pid is what marks this worker as alive
   const heartbeat = setInterval(() => { try { ng.touchLock(); } catch { /* ignore */ } }, 60_000);
   heartbeat.unref();
   try {

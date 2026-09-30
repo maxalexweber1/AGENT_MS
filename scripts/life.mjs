@@ -450,9 +450,10 @@ function chooseMode() {
   // M₳X stays home (the old gate of 35 left a ~20 min window after each meal)
   if (state.today.explores >= cfg.maxExploresPerDay || hunger > 55) w.explore = 0;
   if (last === "explore") w.explore = 0;
-  // contract runs: capped per day, never twice in a row, only when the planner has something to do
-  if (state.today.quests >= cfg.maxQuestsPerDay || last === "quest" || hunger > 55) w.quest = 0;
+  // contract runs: capped per day, half as likely right after one, only when the planner has something to do
+  if (state.today.quests >= cfg.maxQuestsPerDay || hunger > 55) w.quest = 0;
   else if (w.quest > 0 && !quest.available()) w.quest = 0;
+  if (last === "quest") w.quest = Math.round(w.quest / 2);
   // notary sales runs: capped per day, never twice in a row, only with a vault to sell and a price above zero
   if (state.today.hustles >= cfg.maxHustlesPerDay || last === "hustle" || hunger > 55 || !hustle.available()) w.hustle = 0;
   if (last === "social") w.social = Math.round(w.social / 3);
