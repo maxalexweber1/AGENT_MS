@@ -677,8 +677,8 @@ export function renderBody() {
 <footer class="site-footer">
   <div class="verify-how">
     <p><b style="color:var(--ink-2)">Verify any hash yourself</b> against live Midnight contract state &mdash; no wallet, no account. Open a timeline row and press <em>verify on chain now</em>, or call the public verify lane directly:</p>
-    <p><code>GET ${esc(process.env.NIGHTGATE_PUBLIC_VERIFY_URL || "https://api.nightgate.dev/api/v1/verify")}/verifyAttestationState(contractAddress='${esc(d.vault)}',attesterId='${esc(d.attesterId)}',payloadHash='&lt;sha256&gt;',compiledArtifactRef='${esc(d.artifact)}')</code></p>
-    <p class="sub2">With a NIGHTGATE token the same function answers under <code>/api/v1/nightgate/</code> (header <code>x-agent-token</code>).</p>${d.previousVaults.length ? `
+    <p><code>GET ${esc(process.env.NIGHTGATE_PUBLIC_VERIFY_URL || "https://api.nightgate.dev/odata/v4/midnight-verify")}/verifyAttestationState(contractAddress='${esc(d.vault)}',attesterId='${esc(d.attesterId)}',payloadHash='&lt;sha256&gt;',compiledArtifactRef='${esc(d.artifact)}')</code></p>
+    <p class="sub2">With a NIGHTGATE token the same function answers under <code>/odata/v4/midnight/</code> (header <code>x-agent-token</code>).</p>${d.previousVaults.length ? `
     <p class="sub2">For a timeline row tagged with an earlier vault, put that vault's address into <code>contractAddress</code>.</p>` : ""}
     <p>Built on NIGHTGATE &mdash; zero-knowledge attestations on <a href="https://midnight.network">Midnight</a>.
     Sister project: <a href="https://zkpassport.eu">NIGHTPASS</a>. Every anchor was built, proven and signed locally with M&#8371;X's own key and submitted fee-unpaid through cross-server fee sponsoring.</p>
@@ -699,8 +699,8 @@ export function renderBody() {
   };
   const escH = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   // NIGHTGATE's public verify lane (0.24+): token-free, CORS open, rate limited per address
-  const PUBLIC_VERIFY = ${JSON.stringify(process.env.NIGHTGATE_PUBLIC_VERIFY_URL || "https://api.nightgate.dev/api/v1/verify")};
-  const TOKEN_API = "https://api.nightgate.dev/api/v1/nightgate";
+  const PUBLIC_VERIFY = ${JSON.stringify(process.env.NIGHTGATE_PUBLIC_VERIFY_URL || "https://api.nightgate.dev/odata/v4/midnight-verify")};
+  const TOKEN_API = "https://api.nightgate.dev/odata/v4/midnight";
   // Until the API runs 0.24 the live check goes through the token lane with a
   // deliberately weak grant (NIGHTGATE_DASHBOARD_TOKEN at generation time):
   // verify* is free for every token, the one mandatory write action has a

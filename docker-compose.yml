@@ -6,6 +6,8 @@ services:
     env_file: .env
     environment:
       TZ: Europe/Berlin
+    # backstop: the life loop needs ~1.5 GB, one worker ~0.5 GB plus proving
+    mem_limit: 8g
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports

@@ -146,14 +146,12 @@ Any NIGHTGATE token can check a payloadHash against live Midnight contract
 state — no wallet:
 
 ```
-GET /api/v1/nightgate/verifyAttestationState(
+GET /odata/v4/midnight/verifyAttestationState(
       contractAddress='<vault>',payloadHash='<sha256>',
       compiledArtifactRef='attestation-vault-32')
 ```
 
-M₳X's vault (since 2026-09-03):
-`0923eee3c5908ca82d671708dcb85af06080b0920b6bd754e1b138843105240c`.
-Anchors before that date live on the shared public vault
-`9b97a6764805789852351a401b7cfc137097d591cabe33926dfbc42792c00137`.
+M₳X's vault (`attestation-vault-32`, Midnight preprod, since 2026-10-12):
+`6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984`.
 Envelopes anchored before this spec existed used ad-hoc field order; from v1
 on, this document is the contract.

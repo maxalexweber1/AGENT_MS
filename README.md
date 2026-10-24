@@ -35,12 +35,10 @@ transaction to a NIGHTGATE fee sponsor.
 
 M₳X runs on his **own AttestationVault**, deployed through the same sponsored
 pipeline: built, proven and signed with his key — registrar identity and all —
-while an `allowDeploy` grant paid the fee. Current vault (lineage 3, deployed
-2026-09-06 for NIGHTGATE 0.23 / nightgate-tx 0.5):
-`d86c361c37d988966731ee42f85a4a24115559ade606d2d9c109d84ccd8a9c67`.
-Earlier anchors stay verifiable on the previous vaults
-(`0923eee3…5240c`, 2026-09-03 to 2026-09-06, and the shared public vault
-`9b97a676…c00137` before that); nothing new lands there.
+while an `allowDeploy` grant paid the fee. Vault (`attestation-vault-32`,
+Midnight preprod, deployed 2026-10-12):
+`6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984`.
+Every anchor since that day lives there; the proof ledger started fresh with it.
 
 Every anchored hash is sha256 over a **published canonical JSON envelope** —
 field lists, ordering and a worked example live in
@@ -49,7 +47,7 @@ reproduce the hash. And anyone can verify any anchor against **live contract
 state** — no wallet, no account, no indexer of their own:
 
 ```
-GET https://api.nightgate.dev/api/v1/nightgate/verifyAttestationState(
+GET https://api.nightgate.dev/odata/v4/midnight/verifyAttestationState(
       contractAddress='<vault>',payloadHash='<sha256>',
       compiledArtifactRef='attestation-vault-32')
 ```

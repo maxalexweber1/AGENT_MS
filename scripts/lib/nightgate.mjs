@@ -27,9 +27,10 @@
  *   NIGHTGATE_ATTEST=1
  *   NIGHTGATE_SEED_HEX=<128 hex - 0.4.x wants the 64-byte BIP39 seed>
  *   NIGHTGATE_TOKEN=ngat_...              agent grant (sponsor channel)
- *   NIGHTGATE_SPONSOR_SESSION_ID=<uuid>   the sponsor the grant is pinned to
  * Optional: NIGHTGATE_BASE_URL, NIGHTGATE_NETWORK, NIGHTGATE_VAULT,
  *   NIGHTGATE_VAULT_ARTIFACT, NIGHTGATE_SERVICE_PATH, NIGHTGATE_PROOF_SERVER_URL,
+ *   NIGHTGATE_INDEXER_HTTP_URL / NIGHTGATE_INDEXER_WS_URL / NIGHTGATE_NODE_URL (the
+ *   public indexer.<network>.midnight.network is gone since 2026-10-09, set your own),
  *   NIGHTGATE_MAX_ANCHORS_PER_DAY (default 60),
  *   NIGHTGATE_VISIBILITY_WAIT_MS (default 120000: how long the worker waits for
  *   the previous transaction to show up in the public indexer before it builds
@@ -66,7 +67,7 @@ export const sha256hex = (data) => crypto.createHash("sha256").update(data).dige
 /** Visibly-shortened hash: middle ellipsis, start+end stay comparable. */
 export const shortHash = (h) => (h && h.length > 24 ? `${h.slice(0, 12)}…${h.slice(-6)}` : h || "");
 
-/** The platform sponsor pool; a pinned agent grant refuses it and needs its own session id. */
+/** The reserved session id the server files sponsor-pool jobs under; getJobStatus reads them with it. */
 export const POOL_SENTINEL = "00000000-0000-0000-0000-706f6f6c0000";
 
 export function config(env = process.env) {
@@ -75,13 +76,12 @@ export function config(env = process.env) {
   return {
     enabled: env.NIGHTGATE_ATTEST === "1" && !!env.NIGHTGATE_SEED_HEX && !!env.NIGHTGATE_TOKEN,
     baseUrl,
-    servicePath: env.NIGHTGATE_SERVICE_PATH || "/api/v1/nightgate",
+    servicePath: env.NIGHTGATE_SERVICE_PATH || "/odata/v4/midnight",
     token: env.NIGHTGATE_TOKEN || "",
     network,
     seedHex: env.NIGHTGATE_SEED_HEX || "",
-    vault: env.NIGHTGATE_VAULT || "9b97a6764805789852351a401b7cfc137097d591cabe33926dfbc42792c00137",
+    vault: env.NIGHTGATE_VAULT || "6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984",
     artifact: env.NIGHTGATE_VAULT_ARTIFACT || "attestation-vault-32",
-    sponsorSessionId: env.NIGHTGATE_SPONSOR_SESSION_ID || POOL_SENTINEL,
     proofServerUrl: env.NIGHTGATE_PROOF_SERVER_URL || "",
     indexerHttpUrl: env.NIGHTGATE_INDEXER_HTTP_URL || `https://indexer.${network}.midnight.network/api/v4/graphql`,
     indexerWsUrl: env.NIGHTGATE_INDEXER_WS_URL || `wss://indexer.${network}.midnight.network/api/v4/graphql/ws`,
@@ -199,11 +199,11 @@ export async function callFunction(name, params, cfg = config()) {
 
 /** Submit a locally built, fee-unpaid unbound transaction; the sponsor pays. */
 export function sponsorUnbound(unboundTxB64, idempotencyKey, cfg = config()) {
-  return callAction("sponsorUnboundTransaction", { unboundTxB64, sponsorSessionId: cfg.sponsorSessionId, idempotencyKey }, cfg);
+  return callAction("sponsorUnboundTransaction", { unboundTxB64, idempotencyKey }, cfg);
 }
 
 /** One job status read (sponsor jobs live under the sponsor session). */
-export function getJob(jobId, sessionId = config().sponsorSessionId, cfg = config()) {
+export function getJob(jobId, sessionId = POOL_SENTINEL, cfg = config()) {
   return callAction("getJobStatus", { jobId, sessionId }, cfg);
 }
 
@@ -347,13 +347,12 @@ export async function verifyAttestation(payloadHash, cfg = config(), vault = cfg
 /**
  * Structured document -> canonical JSON, payloadHash, salted Merkle
  * contentRoot, schemaId and per-field witnesses. Compute-only server action
- * (always allowed for any valid token). fields/opening/schema arrive as JSON
- * strings and are returned parsed.
+ * (always allowed for any valid token).
  */
 export async function prepareDocumentProof(document, proofFields, cfg = config()) {
   const r = await callAction("prepareDocumentProof", {
-    documentJson: JSON.stringify(document),
-    proofFieldsJson: JSON.stringify(proofFields),
+    document,
+    proofFields,
     compiledArtifactRef: cfg.artifact,
   }, cfg);
   return {
@@ -361,9 +360,9 @@ export async function prepareDocumentProof(document, proofFields, cfg = config()
     canonicalDocument: r.canonicalDocument,
     contentRoot: r.contentRoot,
     schemaId: r.schemaId,
-    schema: JSON.parse(r.schema),
-    fields: JSON.parse(r.fields),
-    opening: JSON.parse(r.opening),
+    schema: r.schema,
+    fields: r.fields,
+    opening: r.opening,
   };
 }
 
@@ -505,10 +504,21 @@ export async function buildSponsorable(item, cfg = config()) {
   return { unboundTxB64: built.unboundTxB64, attesterId: String(b.attesterId) };
 }
 
+// closing waits on the indexer connection; with the indexer down it never returns
+const CLOSE_BUILDER_MAX_MS = 30_000;
+
 export async function closeBuilder() {
   const p = builderPromise;
   builderPromise = null;
-  if (p) { try { await (await p).close?.(); } catch { /* best effort */ } }
+  if (!p) return;
+  const closing = (async () => { try { await (await p).close?.(); } catch { /* best effort */ } })();
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(() => { log("nightgate: builder close timed out - leaving it"); resolve(); }, CLOSE_BUILDER_MAX_MS);
+    timer.unref();
+  });
+  await Promise.race([closing, expired]);
+  clearTimeout(timer);
 }
 
 // ---------- attestation log (data/attestations.json) ----------
@@ -625,7 +635,7 @@ export async function repairLanded(entryAt, jobId, cfg = config()) {
   const old = history().find((a) => a.at === at);
   if (!old) throw new Error(`no attestation entry with at=${entryAt}`);
   if (old.ok) throw new Error(`entry ${entryAt} (${old.kind}) is already ok`);
-  const job = await getJob(jobId, cfg.sponsorSessionId, cfg);
+  const job = await getJob(jobId, POOL_SENTINEL, cfg);
   if (job.status !== "succeeded" || !job.txHash) throw new Error(`job ${jobId} is ${job.status || "?"}${job.errorMessage ? ` (${job.errorMessage})` : ""} - nothing to repair`);
   if (old.txHash && old.txHash !== job.txHash) throw new Error(`entry ${entryAt} names tx ${old.txHash}, job ${jobId} landed ${job.txHash}`);
   const txExplorerHash = await resolveTxHash(job.txHash, cfg);

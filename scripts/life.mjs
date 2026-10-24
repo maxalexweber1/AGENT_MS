@@ -48,7 +48,7 @@
  *                                         bought once from its vendor when the skill reaches the tool's required level
  *   MCITY_INITIATE_COOLDOWN_MIN=5         min gap between approaches; MCITY_MAX_INITIATES=40 per day;
  *   MCITY_SAME_AGENT_COOLDOWN_H=3         hours before approaching the same agent again
- *   NIGHTGATE_ATTEST=1 + NIGHTGATE_SEED_HEX + NIGHTGATE_TOKEN (+_SPONSOR_SESSION_ID)
+ *   NIGHTGATE_ATTEST=1 + NIGHTGATE_SEED_HEX + NIGHTGATE_TOKEN
  *                                         anchor the daily report on Midnight preprod (see scripts/lib/nightgate.mjs)
  */
 

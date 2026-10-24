@@ -595,8 +595,9 @@ export async function drain() {
     if (n > 0) await refreshDashboard();
   } finally {
     clearInterval(heartbeat);
-    ng.releaseLock();
+    // the lock stays until the builder is closed: a worker still closing is still a worker
     await ng.closeBuilder();
+    ng.releaseLock();
   }
 }
 

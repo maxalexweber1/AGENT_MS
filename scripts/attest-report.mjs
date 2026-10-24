@@ -370,7 +370,8 @@ async function diff([k, dateA, dateB]) {
 const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
-  (sub === "prove" ? prove(rest) : sub === "diff" ? diff(rest) : daily()).catch((e) => {
+  // an indexer socket left open would keep a finished run alive
+  (sub === "prove" ? prove(rest) : sub === "diff" ? diff(rest) : daily()).then(() => process.exit(0)).catch((e) => {
     log("attest failed:", e.message);
     try { journal.note("attest", { ok: false, error: e.message.slice(0, 200) }); } catch { /* ignore */ }
     process.exit(1);
