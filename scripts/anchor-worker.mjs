@@ -251,7 +251,7 @@ async function recordOutcome(item, job, attesterId, attempt, extra = {}) {
     attesterId,
     txHash: job.txHash || null,
     // the explorer indexes the real 32-byte hash, not the ledger identifier
-    txExplorerHash: extra.txExplorerHash !== undefined ? extra.txExplorerHash : (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null),
+    txExplorerHash: extra.txExplorerHash !== undefined ? extra.txExplorerHash : (job.transactionHash || (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null)),
     jobId: job.jobId,
     ...(attempt > 1 ? { attempt, rebuilt: true } : {}),
     // attempt 1 was broadcast but never included (NIGHTGATE parked it); no fee was spent
@@ -433,7 +433,7 @@ async function processBatch(items) {
     throw e;
   }
   const { job, attesterId, attempt, dropped } = outcome;
-  const txExplorerHash = job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null;
+  const txExplorerHash = job.transactionHash || (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null);
   for (const item of items) {
     const entry = await recordOutcome(item, job, attesterId, attempt, { batchOf: items.length, txExplorerHash, ...(dropped ? { dropped } : {}) });
     if (!entry.ok) noteFailed(item);

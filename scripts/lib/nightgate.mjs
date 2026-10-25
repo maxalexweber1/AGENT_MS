@@ -236,13 +236,19 @@ export function getJob(jobId, sessionId = POOL_SENTINEL, cfg = config()) {
  * idempotency-key collision) - keep polling until the window is used up and
  * only then throw the last error.
  */
+// NIGHTGATE >= 0.37 holds getJobStatus with waitMs until the job settles; off once a server refuses it.
+let longPoll = true;
+const LONG_POLL_MS = 20_000;
+
 export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyMs = 5_000, cfg = config() } = {}) {
   const t0 = Date.now();
   let job;
   let lastErr = null;
   for (;;) {
+    const waitMs = longPoll ? Math.max(0, Math.min(LONG_POLL_MS, timeoutMs - (Date.now() - t0), cfg.timeoutMs - 5_000)) : 0;
+    const asked = Date.now();
     try {
-      job = await callAction("getJobStatus", { jobId, sessionId }, cfg);
+      job = await callAction("getJobStatus", waitMs > 0 ? { jobId, sessionId, waitMs } : { jobId, sessionId }, cfg);
       lastErr = null;
       if (job.status === "succeeded" || job.status === "failed") return job;
       // NIGHTGATE (0.23+) parks a post-broadcast failure - submit watch timed
@@ -254,6 +260,7 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
       // worker probes for the landing itself and rebuilds when nothing shows up.
       if (job.status === "reconciliation_required" && job.txHash) return job;
     } catch (e) {
+      if (waitMs > 0 && e.status === 400 && /waitMs/.test(e.message)) { longPoll = false; continue; }
       if (!isRetryableError(e)) throw e;
       lastErr = e;
       log(`getJobStatus ${jobId.slice(0, 8)}: ${e.message.slice(0, 80)} - polling on`);
@@ -262,7 +269,8 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
       if (lastErr) throw lastErr;
       return job; // caller sees the non-final status
     }
-    await new Promise((r) => setTimeout(r, everyMs));
+    // a long poll that used its time needs no pause; an early answer or an error does
+    if (waitMs === 0 || lastErr || Date.now() - asked < 1_000) await new Promise((r) => setTimeout(r, everyMs));
   }
 }
 
