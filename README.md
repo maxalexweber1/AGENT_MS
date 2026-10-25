@@ -44,11 +44,12 @@ Every anchored hash is sha256 over a **published canonical JSON envelope** —
 field lists, ordering and a worked example live in
 [`docs/SCHEMAS.md`](docs/SCHEMAS.md), so anyone holding the values can
 reproduce the hash. And anyone can verify any anchor against **live contract
-state** — no wallet, no account, no indexer of their own:
+state** — no wallet, no key, no indexer of their own (the public verify route
+`/odata/v4/midnight-verify`; the same function under `/odata/v4/midnight` needs a key):
 
 ```
-GET https://api.nightgate.dev/odata/v4/midnight/verifyAttestationState(
-      contractAddress='<vault>',payloadHash='<sha256>',
+GET https://api.preprod.odatano.dev/odata/v4/midnight-verify/verifyAttestationState(
+      contractAddress='<vault>',attesterId='<attester id>',payloadHash='<sha256>',
       compiledArtifactRef='attestation-vault-32')
 ```
 
@@ -157,12 +158,12 @@ projects come up. `node scripts/life.mjs news [scan]` lists what he knows.
                                  │     (CHAIN_EXECUTION_FAILED: fee burned) record the burned
                                  │     attempt, rebuild once against fresh state, re-sponsor;
                                  │     if the sponsor's submit watch merely timed out, keep
-                                 │     probing the indexer (NIGHTGATE_LATE_LAND_WAIT_MS) before
+                                 │     probing for the landing (NIGHTGATE_LATE_LAND_WAIT_MS) before
                                  │     writing the item off; items whose prerequisite failed in
                                  │     this run (content root, ZK claims, diff) are skipped unbuilt
                                  │  4. verifyAttestationState against live contract state
                                  │  5. before the NEXT build: wait until this tx is visible
-                                 │     in the public indexer the builder reads state from
+                                 │     where the builder reads state (API or own indexer)
                                  ▼
                        data/attestations.json (last 500) + lifetime counters in
                        data/anchor-stats.json + journal ──► daily report, dashboard,

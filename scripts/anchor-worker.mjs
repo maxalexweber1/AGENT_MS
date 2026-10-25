@@ -2,8 +2,8 @@
 /**
  * Anchor worker: drains data/anchor-queue.jsonl STRICTLY one transaction at a time.
  *
- * Per item: wait until the PREVIOUS transaction is visible in the public
- * indexer (the builder reads the vault state from there - building against a
+ * Per item: wait until the PREVIOUS transaction is visible where the builder
+ * reads the vault state (the NIGHTGATE API or an own indexer) - building against a
  * state that lacks the call that just landed produces a transcript the ledger
  * rejects: the call fails, the sponsor's fee is burned) -> build+prove+sign
  * locally -> sponsorUnboundTransaction -> poll -> on CHAIN_EXECUTION_FAILED
@@ -14,7 +14,7 @@
  *
  * A sponsor "submit watch timed out without a Finalized status" is NOT a
  * verdict (2026-09-07: the daily report's tx was broadcast, the watch gave up
- * after 60 s, the tx never made it): the worker keeps probing the indexer for
+ * after 60 s, the tx never made it): the worker keeps probing for the landing for
  * NIGHTGATE_LATE_LAND_WAIT_MS before writing the item off. Items that depend
  * on a payload whose attest (or content root) failed IN THIS RUN - the content
  * root, every ZK claim, the diff - are skipped without building (they would
@@ -26,7 +26,7 @@
  * re-broadcasts and never fails such a job by itself - a tx that is not
  * included stays parked for good (2026-09-10: the daily report sat there 3 h,
  * the worker took it for an outage and the queue behind it waited). The worker
- * treats it as settled: same indexer probe, and when nothing shows up it
+ * treats it as settled: same landing probe, and when nothing shows up it
  * rebuilds ONCE under a new idempotency key (nothing landed, no fee was
  * spent, the vault state is unchanged; the entry carries `droppedBroadcast`).
  * NIGHTGATE 0.23.3 ends such a job itself (`failed / BROADCAST_NOT_INCLUDED`
@@ -121,7 +121,7 @@ async function idle(ms) {
     ng.touchLock();
   }
 }
-// calls that leave a payload attestation the indexer can be asked about
+// calls that leave a payload attestation verifyAttestationState can confirm
 const PAYLOAD_CALLS = new Set(["attest"]);
 // calls that only make sense once the payload (and its content root) is on chain
 const DEPENDENT_CALLS = new Set(["anchorContentRoot", "proveFieldPredicate", "proveFieldEquality", "proveFieldMembership", "proveFieldsDiffer", "proveDocumentComparison"]);
@@ -143,7 +143,7 @@ const isAmbiguous = (job) => job?.status === "reconciliation_required" && !!job.
 const isDropped = (job) => job?.status === "failed" && job.errorCode === "BROADCAST_NOT_INCLUDED";
 
 /**
- * Keep asking the indexer whether a broadcast tx made it after the sponsor's
+ * Keep asking whether a broadcast tx made it after the sponsor's
  * watch gave up. Returns the job as "succeeded" (lateLanded) when it did and
  * the payload shows up, a synthetic CHAIN_EXECUTION_FAILED when it landed but
  * the call was refused, or the original job when it never appeared.
@@ -153,7 +153,7 @@ async function awaitLateLanding(item, job, { everyMs = 5_000 } = {}) {
   const t0 = Date.now();
   const vault = item.vault || cfg.vault;
   const why = isAmbiguous(job) ? `NIGHTGATE parked job ${job.jobId} as ${job.status}` : "sponsor watch timed out";
-  log(`${item.id} ${item.kind}: ${why} for tx ${ng.shortHash(job.txHash)} - probing the indexer for up to ${Math.round(cfg.lateLandWaitMs / 1000)}s`);
+  log(`${item.id} ${item.kind}: ${why} for tx ${ng.shortHash(job.txHash)} - probing for the landing for up to ${Math.round(cfg.lateLandWaitMs / 1000)}s`);
   while (Date.now() - t0 < cfg.lateLandWaitMs) {
     const p = await ng.probeTx(job.txHash, cfg).catch(() => null);
     if (p) {
@@ -322,6 +322,7 @@ async function submitWithRebuild(items, build, idKey) {
     } else {
       // never build against a state that lacks the previous transaction
       await ng.awaitVisible(lastLanded, cfg);
+      await ng.backfillExplorerHashes(cfg);
       ({ unboundTxB64, attesterId } = await build());
       inflight = { key: idKey, attempt, unboundTxB64, attesterId, builtAt: Date.now(), ...(inflight?.salt ? { salt: inflight.salt } : {}) };
       saveInflight(head.id, inflight);
@@ -591,6 +592,8 @@ export async function drain() {
       if (n >= 80) { log("worker: 80 items in one run - stopping, will be re-kicked"); break; }
     }
     log(`worker done (${n} item${n === 1 ? "" : "s"})`);
+    // the last transaction of the run: wait until it is visible so it gets its explorer hash too
+    if (n > 0) { await ng.awaitVisible(lastLanded, cfg); await ng.backfillExplorerHashes(cfg); }
     // keep the public ledger fresh: regenerate after every drained batch
     if (n > 0) await refreshDashboard();
   } finally {

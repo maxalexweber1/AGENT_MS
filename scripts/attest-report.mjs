@@ -183,7 +183,7 @@ function enqueuePredicate(dp, fieldName, op, threshold, { kick = true } = {}) {
 // ---------- daily flow ----------
 
 async function daily() {
-  if (!cfg.enabled) { log("nightgate attestation not configured (NIGHTGATE_ATTEST/SEED_HEX/TOKEN) - nothing to do"); return; }
+  if (!cfg.enabled) { log("nightgate attestation not configured (NIGHTGATE_ATTEST/SEED_HEX/TOKEN/VAULT) - nothing to do"); return; }
   const file = process.argv[2] && !["prove", "diff"].includes(process.argv[2])
     ? process.argv[2] : path.join(dataDir, "last-report.md");
   if (!fs.existsSync(file)) throw new Error(`report file not found: ${file}`);

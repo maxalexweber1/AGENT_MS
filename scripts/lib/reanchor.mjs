@@ -185,7 +185,7 @@ export async function run({ dryRun = false, sinceMs = 0, verify = true } = {}) {
   const p = plan({ sinceMs, cfg });
   console.log(describe(p));
   if (dryRun) { console.log("\n(dry run - nothing queued)"); return { dryRun: true, ...counts(p) }; }
-  if (!cfg.enabled) throw new Error("nightgate not configured (NIGHTGATE_ATTEST / SEED_HEX / TOKEN)");
+  if (!cfg.enabled) throw new Error("nightgate not configured (NIGHTGATE_ATTEST / SEED_HEX / TOKEN / VAULT)");
 
   let queued = 0, closed = 0, capped = 0;
   const flagged = [];

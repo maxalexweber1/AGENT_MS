@@ -142,12 +142,12 @@ multiple of 50.
 
 ## Verifying an anchor
 
-Any NIGHTGATE token can check a payloadHash against live Midnight contract
-state — no wallet:
+Anyone can check a payloadHash against live Midnight contract state, with no
+wallet and no key, on the public verify route:
 
 ```
-GET /odata/v4/midnight/verifyAttestationState(
-      contractAddress='<vault>',payloadHash='<sha256>',
+GET /odata/v4/midnight-verify/verifyAttestationState(
+      contractAddress='<vault>',attesterId='<attester id>',payloadHash='<sha256>',
       compiledArtifactRef='attestation-vault-32')
 ```
 

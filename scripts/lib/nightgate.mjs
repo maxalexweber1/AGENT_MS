@@ -23,17 +23,18 @@
  * CPU-bound and two calls against the same vault in one block conflict, so
  * strictly one at a time. Enqueue from anywhere is cheap and non-blocking.
  *
- * Config in .env (everything is a no-op unless all three are set):
+ * Config in .env (everything is a no-op unless all four are set):
  *   NIGHTGATE_ATTEST=1
- *   NIGHTGATE_SEED_HEX=<128 hex - 0.4.x wants the 64-byte BIP39 seed>
- *   NIGHTGATE_TOKEN=ngat_...              agent grant (sponsor channel)
- * Optional: NIGHTGATE_BASE_URL, NIGHTGATE_NETWORK, NIGHTGATE_VAULT,
+ *   NIGHTGATE_SEED_HEX=<128 hex chars: the 64-byte BIP39 seed>
+ *   NIGHTGATE_TOKEN=oda_...               gateway key (Bearer); ngat_ = bare agent grant
+ *   NIGHTGATE_VAULT=<64 hex>              your own vault (references/deploy-vault.mjs)
+ * Optional: NIGHTGATE_BASE_URL (default https://api.preprod.odatano.dev), NIGHTGATE_NETWORK,
  *   NIGHTGATE_VAULT_ARTIFACT, NIGHTGATE_SERVICE_PATH, NIGHTGATE_PROOF_SERVER_URL,
- *   NIGHTGATE_INDEXER_HTTP_URL / NIGHTGATE_INDEXER_WS_URL / NIGHTGATE_NODE_URL (the
- *   public indexer.<network>.midnight.network is gone since 2026-10-09, set your own),
+ *   NIGHTGATE_INDEXER_HTTP_URL + NIGHTGATE_INDEXER_WS_URL + NIGHTGATE_NODE_URL (all three
+ *   set: the builder reads the chain from your own indexer and node; else through the API),
  *   NIGHTGATE_MAX_ANCHORS_PER_DAY (default 60),
  *   NIGHTGATE_VISIBILITY_WAIT_MS (default 120000: how long the worker waits for
- *   the previous transaction to show up in the public indexer before it builds
+ *   the previous transaction to become visible where the builder reads before it builds
  *   the next call - a build against a stale vault state lands, fails the call
  *   and burns the sponsor's fee),
  *   NIGHTGATE_BATCH_MAX (default 1 = off: bundle up to N queued plain attests
@@ -71,21 +72,23 @@ export const shortHash = (h) => (h && h.length > 24 ? `${h.slice(0, 12)}…${h.s
 export const POOL_SENTINEL = "00000000-0000-0000-0000-706f6f6c0000";
 
 export function config(env = process.env) {
-  const baseUrl = (env.NIGHTGATE_BASE_URL || "https://api.nightgate.dev").replace(/\/+$/, "");
+  const baseUrl = (env.NIGHTGATE_BASE_URL || "https://api.preprod.odatano.dev").replace(/\/+$/, "");
   const network = env.NIGHTGATE_NETWORK || "preprod";
   return {
-    enabled: env.NIGHTGATE_ATTEST === "1" && !!env.NIGHTGATE_SEED_HEX && !!env.NIGHTGATE_TOKEN,
+    enabled: env.NIGHTGATE_ATTEST === "1" && !!env.NIGHTGATE_SEED_HEX && !!env.NIGHTGATE_TOKEN && !!env.NIGHTGATE_VAULT,
     baseUrl,
     servicePath: env.NIGHTGATE_SERVICE_PATH || "/odata/v4/midnight",
+    // the public verify route: same functions, no key, no units
+    verifyServicePath: env.NIGHTGATE_VERIFY_SERVICE_PATH || "/odata/v4/midnight-verify",
     token: env.NIGHTGATE_TOKEN || "",
     network,
     seedHex: env.NIGHTGATE_SEED_HEX || "",
-    vault: env.NIGHTGATE_VAULT || "6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984",
+    vault: env.NIGHTGATE_VAULT || "",
     artifact: env.NIGHTGATE_VAULT_ARTIFACT || "attestation-vault-32",
     proofServerUrl: env.NIGHTGATE_PROOF_SERVER_URL || "",
-    indexerHttpUrl: env.NIGHTGATE_INDEXER_HTTP_URL || `https://indexer.${network}.midnight.network/api/v4/graphql`,
-    indexerWsUrl: env.NIGHTGATE_INDEXER_WS_URL || `wss://indexer.${network}.midnight.network/api/v4/graphql/ws`,
-    nodeUrl: env.NIGHTGATE_NODE_URL || `wss://rpc.${network}.midnight.network/`,
+    indexerHttpUrl: env.NIGHTGATE_INDEXER_HTTP_URL || "",
+    indexerWsUrl: env.NIGHTGATE_INDEXER_WS_URL || "",
+    nodeUrl: env.NIGHTGATE_NODE_URL || "",
     timeoutMs: Number(env.NIGHTGATE_TIMEOUT_MS || 30_000),
     maxAnchorsPerDay: Number(env.NIGHTGATE_MAX_ANCHORS_PER_DAY || 60),
     visibilityWaitMs: Number(env.NIGHTGATE_VISIBILITY_WAIT_MS ?? 120_000),
@@ -100,6 +103,23 @@ export function config(env = process.env) {
     outageRetries: Math.max(0, Number(env.NIGHTGATE_OUTAGE_RETRIES ?? 8)),
   };
 }
+
+/** True when an own indexer and node are configured; otherwise the chain is read through the NIGHTGATE API. */
+export const usesOwnIndexer = (cfg) => !!(cfg.indexerHttpUrl && cfg.indexerWsUrl && cfg.nodeUrl);
+
+/** The connect() options of nightgate-tx for this config, with the same auth rule as headers(). */
+export function apiOptions(cfg) {
+  const auth = cfg.token.startsWith("ngat_") ? { agentToken: cfg.token } : { token: cfg.token };
+  return { baseUrl: cfg.baseUrl, servicePath: cfg.servicePath, ...auth };
+}
+
+/** Where the builder and the landing probe read the chain: the own indexer, else the API. */
+export const chainSource = (cfg) => (usesOwnIndexer(cfg) ? { indexerHttpUrl: cfg.indexerHttpUrl } : { api: apiOptions(cfg) });
+
+/** The chain options of createTxBuilder: indexer and node URLs, or the API. */
+export const builderChainOptions = (cfg) => (usesOwnIndexer(cfg)
+  ? { indexerHttpUrl: cfg.indexerHttpUrl, indexerWsUrl: cfg.indexerWsUrl, nodeUrl: cfg.nodeUrl }
+  : { api: apiOptions(cfg) });
 
 /**
  * Does this error message describe NIGHTGATE (or the network) being down or
@@ -231,7 +251,7 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
       // broadcast that never reaches a block stays there forever (the
       // confirmer's "not indexed -> stays"; 2026-09-10: the daily report sat
       // there 3 h and the worker treated it as an outage). Settled for us: the
-      // worker probes the indexer itself and rebuilds when nothing shows up.
+      // worker probes for the landing itself and rebuilds when nothing shows up.
       if (job.status === "reconciliation_required" && job.txHash) return job;
     } catch (e) {
       if (!isRetryableError(e)) throw e;
@@ -248,10 +268,17 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
 
 /**
  * Resolve a ledger tx IDENTIFIER (33 bytes, what jobs report) to the real
- * 32-byte transaction hash the Midnight explorer indexes, via the public
- * indexer. Returns null when unknown/unreachable.
+ * 32-byte transaction hash the Midnight explorer indexes, via the own indexer
+ * or the API's Transactions/byIdentifier. Returns null when unknown/unreachable.
  */
 export async function resolveTxHash(identifier, cfg = config()) {
+  if (!usesOwnIndexer(cfg)) {
+    try {
+      const { connect } = await import("@odatano/nightgate-tx");
+      const found = await connect(apiOptions(cfg)).transactionByIdentifier(identifier);
+      return found?.ledgerTxHash || null;
+    } catch { return null; }
+  }
   try {
     const res = await fetch(cfg.indexerHttpUrl, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -263,16 +290,24 @@ export async function resolveTxHash(identifier, cfg = config()) {
   } catch { return null; }
 }
 
+/** Fill txExplorerHash on entries of the last hour that the server had not indexed yet when they were recorded. */
+export async function backfillExplorerHashes(cfg = config()) {
+  const recent = (a) => a.ok && a.txHash && !a.txExplorerHash && Date.now() - a.at < 60 * 60_000;
+  const found = new Map();
+  for (const a of history().filter(recent)) if (!found.has(a.txHash)) found.set(a.txHash, await resolveTxHash(a.txHash, cfg));
+  return updateHistory((a) => (recent(a) && found.get(a.txHash) ? { ...a, txExplorerHash: found.get(a.txHash) } : a));
+}
+
 /**
- * Is the transaction with this ledger identifier visible in the public
- * indexer? { applied, height } or null while unknown. Uses the SDK's
+ * Is the transaction with this ledger identifier visible where the builder
+ * reads the chain? { applied, height } or null while unknown. Uses the SDK's
  * probeLanded when the optional dependency is installed, else a plain
  * "is the hash known" query.
  */
 export async function probeTx(identifier, cfg = config()) {
   try {
     const { probeLanded } = await import("@odatano/nightgate-tx/txbuilder");
-    return await probeLanded(identifier, { indexerHttpUrl: cfg.indexerHttpUrl, timeoutMs: 10_000 });
+    return await probeLanded(identifier, { ...chainSource(cfg), timeoutMs: 10_000 });
   } catch {
     const hash = await resolveTxHash(identifier, cfg);
     return hash ? { applied: true, height: "?", status: "SUCCESS", failedSegments: [] } : null;
@@ -280,9 +315,9 @@ export async function probeTx(identifier, cfg = config()) {
 }
 
 /**
- * Wait until the previous transaction is visible in the indexer the builder
- * reads its vault state from - and, for an attest, until verifyAttestationState
- * (same indexer) shows the payload. The builder otherwise reads a state that
+ * Wait until the previous transaction is visible where the builder reads its
+ * vault state - and, for an attest, until verifyAttestationState shows the
+ * payload. The builder otherwise reads a state that
  * lacks the call that just landed, proves for a minute and submits a
  * transcript the ledger rejects as stale: the call fails, the sponsor's fee
  * is gone (2026-09-05: one or two such pairs a day). Returns the ms waited;
@@ -305,8 +340,8 @@ export async function awaitVisible(landed, cfg = config(), { everyMs = 2_000 } =
     await new Promise((r) => setTimeout(r, everyMs));
   }
   const waited = Date.now() - t0;
-  if (Date.now() >= deadline) log(`indexer still behind after ${Math.round(waited / 1000)}s (tx ${shortHash(landed.txHash)}) - building anyway`);
-  else if (waited > everyMs) log(`waited ${Math.round(waited / 1000)}s for the indexer to show tx ${shortHash(landed.txHash)}`);
+  if (Date.now() >= deadline) log(`tx ${shortHash(landed.txHash)} still not visible after ${Math.round(waited / 1000)}s - building anyway`);
+  else if (waited > everyMs) log(`waited ${Math.round(waited / 1000)}s for tx ${shortHash(landed.txHash)} to become visible`);
   return waited;
 }
 
@@ -341,7 +376,7 @@ export async function attesterIdOf(cfg = config()) {
 export async function verifyAttestation(payloadHash, cfg = config(), vault = cfg.vault, attesterId = null) {
   return callFunction("verifyAttestationState", {
     contractAddress: vault, attesterId: attesterId || await attesterIdOf(cfg), payloadHash, compiledArtifactRef: cfg.artifact,
-  }, cfg);
+  }, { ...cfg, servicePath: cfg.verifyServicePath, token: "" });
 }
 
 /**
@@ -411,9 +446,7 @@ async function getBuilder(cfg) {
       const opts = {
         seedHex: cfg.seedHex,
         networkId: cfg.network,
-        indexerHttpUrl: cfg.indexerHttpUrl,
-        indexerWsUrl: cfg.indexerWsUrl,
-        nodeUrl: cfg.nodeUrl,
+        ...builderChainOptions(cfg),
         zkConfigBaseUrl: `${cfg.baseUrl}/zk-config/${cfg.artifact}`,
         contractClass: vault.Contract,
         contractName: cfg.artifact,
@@ -504,7 +537,7 @@ export async function buildSponsorable(item, cfg = config()) {
   return { unboundTxB64: built.unboundTxB64, attesterId: String(b.attesterId) };
 }
 
-// closing waits on the indexer connection; with the indexer down it never returns
+// closing waits on the builder's connections; with the chain source down it never returns
 const CLOSE_BUILDER_MAX_MS = 30_000;
 
 export async function closeBuilder() {
