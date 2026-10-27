@@ -29,10 +29,9 @@
     "nodemailer": "^9.0.6"
   },
   "optionalDependencies": {
-    "@odatano/nightgate-tx": "^0.15.0"
+    "@odatano/nightgate-tx": "^0.15.1"
   },
   "overrides": {
-    "@midnight-ntwrk/ledger-v8": "8.1.0",
-    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"
+    "@midnight-ntwrk/ledger-v8": "8.1.0"
   }
 }
