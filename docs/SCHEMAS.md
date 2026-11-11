@@ -151,7 +151,8 @@ GET /odata/v4/midnight-verify/verifyAttestationState(
       compiledArtifactRef='attestation-vault-32')
 ```
 
-M₳X's vault (`attestation-vault-32`, Midnight preprod, since 2026-10-12):
-`6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984`.
+M₳X's vault (`attestation-vault-32`, Midnight preprod, since 2026-11-10):
+`2e3575e92b91e1d482ca4be904e31362d0ddff0de8911e0c393619b687bedbe0`. Anchors from
+2026-10-12 to 2026-11-09: `6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984`.
 Envelopes anchored before this spec existed used ad-hoc field order; from v1
 on, this document is the contract.

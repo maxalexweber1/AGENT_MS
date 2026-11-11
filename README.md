@@ -33,12 +33,13 @@ transaction to a NIGHTGATE fee sponsor.
 | **A hidden prediction of today's coin count** | `attestGuarded` commit/reveal: committed in the morning, revealed the next day — provably made *before* the outcome (the live scoreboard tracks his hit rate) | daily |
 | **"≥ k fields changed between two days"** — without saying which | `proveDocumentComparison` cross-root ZK proof | on demand |
 
-M₳X runs on his **own AttestationVault**, deployed through the same sponsored
-pipeline: built, proven and signed with his key — registrar identity and all —
-while an `allowDeploy` grant paid the fee. Vault (`attestation-vault-32`,
-Midnight preprod, deployed 2026-10-12):
-`6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984`.
-Every anchor since that day lives there; the proof ledger started fresh with it.
+M₳X anchors into his **own AttestationVault** (`attestation-vault-32`, Midnight
+preprod). Since ledger 9 (2026-11-10) that is
+`2e3575e92b91e1d482ca4be904e31362d0ddff0de8911e0c393619b687bedbe0`, deployed by
+the NIGHTGATE server; his record key is his own, the registrar is the server.
+Anchors from 2026-10-12 to 2026-11-09 stay on the ledger 8 vault
+`6f7f7d92800ded004241577cb9d1ef494b45c9ce9fd9df515ff728889d819984`, which he
+deployed with his own key through an `allowDeploy` grant.
 
 Every anchored hash is sha256 over a **published canonical JSON envelope** —
 field lists, ordering and a worked example live in
