@@ -146,9 +146,9 @@ Anyone can check a payloadHash against live Midnight contract state, with no
 wallet and no key, on the public verify route:
 
 ```
-GET /odata/v4/midnight-verify/verifyAttestationState(
+GET /odata/v4/midnight-verify/verifyAttestation(
       contractAddress='<vault>',attesterId='<attester id>',payloadHash='<sha256>',
-      compiledArtifactRef='attestation-vault-32')
+      contractName='attestation-vault-32')
 ```
 
 M₳X's vault (`attestation-vault-32`, Midnight preprod, since 2026-11-10):

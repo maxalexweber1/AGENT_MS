@@ -677,7 +677,7 @@ export function renderBody() {
 <footer class="site-footer">
   <div class="verify-how">
     <p><b style="color:var(--ink-2)">Verify any hash yourself</b> against live Midnight contract state &mdash; no wallet, no account. Open a timeline row and press <em>verify on chain now</em>, or call the public verify lane directly:</p>
-    <p><code>GET ${esc(process.env.NIGHTGATE_PUBLIC_VERIFY_URL || "https://api.nightgate.dev/odata/v4/midnight-verify")}/verifyAttestationState(contractAddress='${esc(d.vault)}',attesterId='${esc(d.attesterId)}',payloadHash='&lt;sha256&gt;',compiledArtifactRef='${esc(d.artifact)}')</code></p>
+    <p><code>GET ${esc(process.env.NIGHTGATE_PUBLIC_VERIFY_URL || "https://api.nightgate.dev/odata/v4/midnight-verify")}/verifyAttestation(contractAddress='${esc(d.vault)}',attesterId='${esc(d.attesterId)}',payloadHash='&lt;sha256&gt;',contractName='${esc(d.artifact)}')</code></p>
     <p class="sub2">With a NIGHTGATE token the same function answers under <code>/odata/v4/midnight/</code> (header <code>x-agent-token</code>).</p>${d.previousVaults.length ? `
     <p class="sub2">For a timeline row tagged with an earlier vault, put that vault's address into <code>contractAddress</code>.</p>` : ""}
     <p>Built on NIGHTGATE &mdash; zero-knowledge attestations on <a href="https://midnight.network">Midnight</a>.
@@ -709,7 +709,7 @@ export function renderBody() {
   const VERIFY_TOKEN = ${JSON.stringify(process.env.NIGHTGATE_DASHBOARD_TOKEN || "")};
   // lineage 4 (NIGHTGATE 0.24): a record is (attesterId, payloadHash) - a payloadHash alone is a 400
   const ATTESTER = ${JSON.stringify(d.attesterId)};
-  const verifyArgs = (vault, hash) => "/verifyAttestationState(contractAddress='" + vault + "',attesterId='" + ATTESTER + "',payloadHash='" + hash + "',compiledArtifactRef='" + ARTIFACT + "')";
+  const verifyArgs = (vault, hash) => "/verifyAttestation(contractAddress='" + vault + "',attesterId='" + ATTESTER + "',payloadHash='" + hash + "',contractName='" + ARTIFACT + "')";
   const verifyUrl = (vault, hash) => PUBLIC_VERIFY + verifyArgs(vault, hash);
   const verifyUrlToken = (vault, hash) => TOKEN_API + verifyArgs(vault, hash);
   const verifyRequest = (vault, hash) => VERIFY_TOKEN

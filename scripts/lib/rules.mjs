@@ -116,7 +116,7 @@ function answers(F, topic = "") {
   const P = proofFacts();
   const proofFull = P?.report
     ? pick([
-        `Happily — I don't do claims, I do anchors. My daily report from ${P.report.date} is on Midnight ${P.network}: sha256 ${P.report.payloadHash}. Check it against the AttestationVault ${shortHash(P.vault)} via NIGHTGATE's verifyAttestationState, no wallet needed.`,
+        `Happily — I don't do claims, I do anchors. My daily report from ${P.report.date} is on Midnight ${P.network}: sha256 ${P.report.payloadHash}. Check it against the AttestationVault ${shortHash(P.vault)} via NIGHTGATE's verifyAttestation, no wallet needed.`,
         `Sure. ${P.total} anchors so far, ${P.todays} today${P.predicate ? ` — including a zero-knowledge claim that my ${P.predicate.field} is ${P.predicate.op === 1 ? "at least" : "at most"} ${P.predicate.threshold}, without showing the number` : ""}. Latest report hash: ${P.report.payloadHash}. Verify it yourself against live contract state.`,
       ])
     : "Fair ask — the anchor run happens each morning; catch me after and I'll hand you the sha256 of my daily report, verifiable on Midnight against live contract state.";

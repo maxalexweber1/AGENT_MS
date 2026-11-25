@@ -49,9 +49,9 @@ state** — no wallet, no key, no indexer of their own (the public verify route
 `/odata/v4/midnight-verify`; the same function under `/odata/v4/midnight` needs a key):
 
 ```
-GET https://api.preprod.odatano.dev/odata/v4/midnight-verify/verifyAttestationState(
+GET https://api.preprod.odatano.dev/odata/v4/midnight-verify/verifyAttestation(
       contractAddress='<vault>',attesterId='<attester id>',payloadHash='<sha256>',
-      compiledArtifactRef='attestation-vault-32')
+      contractName='attestation-vault-32')
 ```
 
 And M₳X talks about it in-game: his conversation engine (LLM persona + rule
@@ -153,7 +153,7 @@ projects come up. `node scripts/life.mjs news [scan]` lists what he knows.
    data/anchor-queue.jsonl ──► anchor-worker.mjs (detached child, strictly serial)
                                  │  1. build + prove + sign LOCALLY (@odatano/nightgate-tx,
                                  │     in-process wasm, seed never leaves the machine)
-                                 │  2. sponsorUnboundTransaction  ── sponsor pays the dust,
+                                 │  2. sponsorUnbound  ───────────── sponsor pays the dust,
                                  │     the on-chain effect carries M₳X's OWN attester id
                                  │  3. poll getJobStatus; if the call was refused on chain
                                  │     (CHAIN_EXECUTION_FAILED: fee burned) record the burned
@@ -162,7 +162,7 @@ projects come up. `node scripts/life.mjs news [scan]` lists what he knows.
                                  │     probing for the landing (NIGHTGATE_LATE_LAND_WAIT_MS) before
                                  │     writing the item off; items whose prerequisite failed in
                                  │     this run (content root, ZK claims, diff) are skipped unbuilt
-                                 │  4. verifyAttestationState against live contract state
+                                 │  4. verifyAttestation against live contract state
                                  │  5. before the NEXT build: wait until this tx is visible
                                  │     where the builder reads state (API or own indexer)
                                  ▼
@@ -214,7 +214,7 @@ to the Midnight explorer:
 - daily commit/reveal predictions with a public hit-rate scoreboard
   (first two calls: −12 % and −9 % off the actual outcome)
 - hundreds of batch, conversation and exploration anchors — all verifiable
-  via `verifyAttestationState`, and M₳X will happily quote you the hashes
+  via `verifyAttestation`, and M₳X will happily quote you the hashes
   in-game. Since day three he anchors on his own sponsored-deployed vault.
 
 ## Related projects

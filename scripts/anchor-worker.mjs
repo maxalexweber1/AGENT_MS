@@ -6,7 +6,7 @@
  * reads the vault state (the NIGHTGATE API or an own indexer) - building against a
  * state that lacks the call that just landed produces a transcript the ledger
  * rejects: the call fails, the sponsor's fee is burned) -> build+prove+sign
- * locally -> sponsorUnboundTransaction -> poll -> on CHAIN_EXECUTION_FAILED
+ * locally -> sponsorUnbound -> poll -> on CHAIN_EXECUTION_FAILED
  * record the burned attempt, wait for the collision tx to be indexed, rebuild
  * once -> verify -> data/attestations.json + journal event `attest`. Failures
  * are recorded and dropped (no infinite retries); the queue survives crashes
@@ -121,7 +121,7 @@ async function idle(ms) {
     ng.touchLock();
   }
 }
-// calls that leave a payload attestation verifyAttestationState can confirm
+// calls that leave a payload attestation verifyAttestation can confirm
 const PAYLOAD_CALLS = new Set(["attest"]);
 // calls that only make sense once the payload (and its content root) is on chain
 const DEPENDENT_CALLS = new Set(["anchorContentRoot", "proveFieldPredicate", "proveFieldEquality", "proveFieldMembership", "proveFieldsDiffer", "proveDocumentComparison"]);
@@ -251,7 +251,7 @@ async function recordOutcome(item, job, attesterId, attempt, extra = {}) {
     attesterId,
     txHash: job.txHash || null,
     // the explorer indexes the real 32-byte hash, not the ledger identifier
-    txExplorerHash: extra.txExplorerHash !== undefined ? extra.txExplorerHash : (job.transactionHash || (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null)),
+    txExplorerHash: extra.txExplorerHash !== undefined ? extra.txExplorerHash : (job.txExplorerHash || (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null)),
     jobId: job.jobId,
     ...(attempt > 1 ? { attempt, rebuilt: true } : {}),
     // attempt 1 was broadcast but never included (NIGHTGATE parked it); no fee was spent
@@ -433,7 +433,7 @@ async function processBatch(items) {
     throw e;
   }
   const { job, attesterId, attempt, dropped } = outcome;
-  const txExplorerHash = job.transactionHash || (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null);
+  const txExplorerHash = job.txExplorerHash || (job.txHash ? await ng.resolveTxHash(job.txHash, cfg) : null);
   for (const item of items) {
     const entry = await recordOutcome(item, job, attesterId, attempt, { batchOf: items.length, txExplorerHash, ...(dropped ? { dropped } : {}) });
     if (!entry.ok) noteFailed(item);

@@ -3,7 +3,7 @@
  * dust paid by a sponsor - M₳X never needs NIGHT or DUST.
  *
  * What M₳X proves (all built LOCALLY with @odatano/nightgate-tx, the seed
- * never leaves the machine; the sponsor pays via sponsorUnboundTransaction):
+ * never leaves the machine; the sponsor pays via sponsorUnbound):
  *   - daily report: structured document anchor (attest + anchorContentRoot,
  *     salted Merkle content root over the day's numbers) - enables the ZK
  *     field proofs below
@@ -133,12 +133,12 @@ export function isApiOutage(message) {
     .test(String(message || ""));
 }
 
-// NIGHTGATE >= 0.28 error codes a client may retry unchanged (mirrors RETRYABLE_ERROR_CODES
-// of @odatano/nightgate-tx 0.7, plus the job-level wallet-sync codes); compared normalised
+// Error codes a client may retry unchanged (RETRYABLE_ERROR_CODES of @odatano/nightgate-tx),
+// plus the job code of a send that broke off before the node answered; compared normalised
 const RETRYABLE_CODES = new Set([
   "RATE_LIMITED", "BAD_GATEWAY", "UNAVAILABLE", "ACCOUNT_KEY_UNAVAILABLE", "JOB_ADMISSION_BUSY",
   "PROVER_KEYS_UNAVAILABLE", "RUNTIME_UNAVAILABLE", "SPONSOR_POLICY_UNAVAILABLE", "SUBMIT_INTENT_TIMEOUT",
-  "WALLET_NOT_SYNCED", "WALLET_SYNCING", "WORKER_ROTATING", "NETWORKORTIMEOUT",
+  "WALLET_NOT_SYNCED", "WALLET_SYNCING", "WORKER_ROTATING", "NETWORK_OR_TIMEOUT",
 ]);
 // codes that no retry fixes: the grant or the sponsor policy has to change first
 const HALT_CODES = new Set(["AGENT_GRANT_REVOKED", "SPONSOR_POLICY_EMPTY"]);
@@ -206,11 +206,12 @@ export async function callAction(name, params, cfg = config()) {
   return parse(res);
 }
 
-/** GET <service>/<name>(k='v',...) (OData unbound function; string params only). */
+/** GET <service>/<name>(k='v',n=1,...) (OData unbound function; numbers and booleans unquoted). */
 export async function callFunction(name, params, cfg = config()) {
+  const literal = (v) => (typeof v === "number" || typeof v === "boolean" ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
   const parts = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== null && v !== "")
-    .map(([k, v]) => `${k}='${String(v).replace(/'/g, "''")}'`);
+    .map(([k, v]) => `${k}=${literal(v)}`);
   const res = await fetch(`${cfg.baseUrl}${cfg.servicePath}/${name}(${parts.join(",")})`, {
     method: "GET", headers: headers(cfg), signal: AbortSignal.timeout(cfg.timeoutMs),
   });
@@ -219,12 +220,18 @@ export async function callFunction(name, params, cfg = config()) {
 
 /** Submit a locally built, fee-unpaid unbound transaction; the sponsor pays. */
 export function sponsorUnbound(unboundTxB64, idempotencyKey, cfg = config()) {
-  return callAction("sponsorUnboundTransaction", { unboundTxB64, idempotencyKey }, cfg);
+  return callAction("sponsorUnbound", { unboundTxB64, idempotencyKey }, cfg);
 }
 
+/**
+ * A job in the names this repo stores: `txHash` is the ledger identifier the server calls `txId`,
+ * `txExplorerHash` the ledger hash explorers show, which the server calls `txHash`.
+ */
+const asJob = (job) => (job ? { ...job, txHash: job.txId ?? null, txExplorerHash: job.txHash ?? null } : job);
+
 /** One job status read (sponsor jobs live under the sponsor session). */
-export function getJob(jobId, sessionId = POOL_SENTINEL, cfg = config()) {
-  return callAction("getJobStatus", { jobId, sessionId }, cfg);
+export async function getJob(jobId, sessionId = POOL_SENTINEL, cfg = config()) {
+  return asJob(await callFunction("getJobStatus", { jobId, sessionId }, cfg));
 }
 
 /**
@@ -236,8 +243,7 @@ export function getJob(jobId, sessionId = POOL_SENTINEL, cfg = config()) {
  * idempotency-key collision) - keep polling until the window is used up and
  * only then throw the last error.
  */
-// NIGHTGATE >= 0.37 holds getJobStatus with waitMs until the job settles; off once a server refuses it.
-let longPoll = true;
+// getJobStatus holds the call with waitMs until the job settles.
 const LONG_POLL_MS = 20_000;
 
 export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyMs = 5_000, cfg = config() } = {}) {
@@ -245,10 +251,10 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
   let job;
   let lastErr = null;
   for (;;) {
-    const waitMs = longPoll ? Math.max(0, Math.min(LONG_POLL_MS, timeoutMs - (Date.now() - t0), cfg.timeoutMs - 5_000)) : 0;
+    const waitMs = Math.max(0, Math.min(LONG_POLL_MS, timeoutMs - (Date.now() - t0), cfg.timeoutMs - 5_000));
     const asked = Date.now();
     try {
-      job = await callAction("getJobStatus", waitMs > 0 ? { jobId, sessionId, waitMs } : { jobId, sessionId }, cfg);
+      job = asJob(await callFunction("getJobStatus", waitMs > 0 ? { jobId, sessionId, waitMs } : { jobId, sessionId }, cfg));
       lastErr = null;
       if (job.status === "succeeded" || job.status === "failed") return job;
       // NIGHTGATE (0.23+) parks a post-broadcast failure - submit watch timed
@@ -260,7 +266,6 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
       // worker probes for the landing itself and rebuilds when nothing shows up.
       if (job.status === "reconciliation_required" && job.txHash) return job;
     } catch (e) {
-      if (waitMs > 0 && e.status === 400 && /waitMs/.test(e.message)) { longPoll = false; continue; }
       if (!isRetryableError(e)) throw e;
       lastErr = e;
       log(`getJobStatus ${jobId.slice(0, 8)}: ${e.message.slice(0, 80)} - polling on`);
@@ -277,14 +282,14 @@ export async function waitForJob(jobId, sessionId, { timeoutMs = 180_000, everyM
 /**
  * Resolve a ledger tx IDENTIFIER (33 bytes, what jobs report) to the real
  * 32-byte transaction hash the Midnight explorer indexes, via the own indexer
- * or the API's Transactions/byIdentifier. Returns null when unknown/unreachable.
+ * or the API's Transactions/byTxId. Returns null when unknown/unreachable.
  */
 export async function resolveTxHash(identifier, cfg = config()) {
   if (!usesOwnIndexer(cfg)) {
     try {
       const { connect } = await import("@odatano/nightgate-tx");
-      const found = await connect(apiOptions(cfg)).transactionByIdentifier(identifier);
-      return found?.ledgerTxHash || null;
+      const found = await connect(apiOptions(cfg)).transactionByTxId(identifier);
+      return found?.txHash || null;
     } catch { return null; }
   }
   try {
@@ -324,7 +329,7 @@ export async function probeTx(identifier, cfg = config()) {
 
 /**
  * Wait until the previous transaction is visible where the builder reads its
- * vault state - and, for an attest, until verifyAttestationState shows the
+ * vault state - and, for an attest, until verifyAttestation shows the
  * payload. The builder otherwise reads a state that
  * lacks the call that just landed, proves for a minute and submits a
  * transcript the ledger rejects as stale: the call fails, the sponsor's fee
@@ -382,8 +387,8 @@ export async function attesterIdOf(cfg = config()) {
  * payloadHash); a payloadHash alone is a 400.)
  */
 export async function verifyAttestation(payloadHash, cfg = config(), vault = cfg.vault, attesterId = null) {
-  return callFunction("verifyAttestationState", {
-    contractAddress: vault, attesterId: attesterId || await attesterIdOf(cfg), payloadHash, compiledArtifactRef: cfg.artifact,
+  return callFunction("verifyAttestation", {
+    contractAddress: vault, attesterId: attesterId || await attesterIdOf(cfg), payloadHash, contractName: cfg.artifact,
   }, { ...cfg, servicePath: cfg.verifyServicePath, token: "" });
 }
 
@@ -396,7 +401,7 @@ export async function prepareDocumentProof(document, proofFields, cfg = config()
   const r = await callAction("prepareDocumentProof", {
     document,
     proofFields,
-    compiledArtifactRef: cfg.artifact,
+    contractName: cfg.artifact,
   }, cfg);
   return {
     payloadHash: r.payloadHash,
@@ -481,10 +486,11 @@ async function getBuilder(cfg) {
  * M₳X' attesterId. `validUntil` (UNIX s) is optional, the helper defaults to
  * one year. Exported for offline wiring tests (after loadTxModules()).
  */
-export function prepareCall(item, secret, slotWidth, attesterId) {
+export async function prepareCall(item, secret, slotWidth, attesterId) {
   const c = callsModule;
   const p = item.params;
   const rk = (payloadHash) => txModule.computeRecordKey(attesterId, payloadHash);
+  const [recordKey, recordKeyA, recordKeyB] = await Promise.all([p.payloadHash, p.payloadHashA, p.payloadHashB].map((h) => (h ? rk(h) : undefined)));
   const validUntil = p.validUntil != null ? BigInt(p.validUntil) : undefined;
   switch (item.call) {
     case "attest":
@@ -493,17 +499,17 @@ export function prepareCall(item, secret, slotWidth, attesterId) {
       return c.prepareAnchorContentRoot({ payloadHash: p.payloadHash, contentRoot: p.contentRoot, schemaId: p.schemaId, attestationSecret: secret });
     case "proveFieldPredicate":
       return c.prepareProveFieldPredicate({
-        recordKey: rk(p.payloadHash), fieldKey: p.fieldKey, threshold: BigInt(p.threshold), op: BigInt(p.op), validUntil,
+        recordKey, fieldKey: p.fieldKey, threshold: BigInt(p.threshold), op: BigInt(p.op), validUntil,
         merkleProof: item.merkleProof, attestationSecret: secret, slotWidth,
       });
     case "proveFieldsUnchangedExcept":
       return c.prepareProveFieldsUnchangedExcept({
-        recordKeyA: rk(p.payloadHashA), recordKeyB: rk(p.payloadHashB), allowedMask: Number(p.allowedMask), validUntil,
+        recordKeyA, recordKeyB, allowedMask: Number(p.allowedMask), validUntil,
         docPair: item.docPair, attestationSecret: secret, slotWidth,
       });
     case "proveFieldsDiffer":
       return c.prepareProveFieldsDiffer({
-        recordKeyA: rk(p.payloadHashA), recordKeyB: rk(p.payloadHashB), k: Number(p.k), validUntil,
+        recordKeyA, recordKeyB, k: Number(p.k), validUntil,
         docPair: item.docPair, attestationSecret: secret, slotWidth,
       });
     default:
@@ -522,7 +528,7 @@ export async function buildSponsorableBatch(items, cfg = config()) {
   const slotWidth = cfg.artifact === "attestation-vault-32" ? 32 : 16;
   const vault = items[0].vault || cfg.vault;
   if (items.some((i) => i.call !== "attest" || (i.vault || cfg.vault) !== vault)) throw new Error("batch: only plain attests on one vault");
-  const calls = items.map((i) => prepareCall(i, b.attestationSecret, slotWidth, String(b.attesterId)));
+  const calls = await Promise.all(items.map((i) => prepareCall(i, b.attestationSecret, slotWidth, String(b.attesterId))));
   const t0 = Date.now();
   const built = await b.buildSponsorable({ contractAddress: vault, calls, bind: false });
   log(`built+proved batch of ${items.length} attests in ${Math.round((Date.now() - t0) / 1000)}s`);
@@ -538,7 +544,7 @@ export async function buildSponsorableBatch(items, cfg = config()) {
 export async function buildSponsorable(item, cfg = config()) {
   const b = await getBuilder(cfg);
   const slotWidth = cfg.artifact === "attestation-vault-32" ? 32 : 16;
-  const call = prepareCall(item, b.attestationSecret, slotWidth, String(b.attesterId));
+  const call = await prepareCall(item, b.attestationSecret, slotWidth, String(b.attesterId));
   const t0 = Date.now();
   const built = await b.buildSponsorable({ contractAddress: item.vault || cfg.vault, call, bind: false });
   log(`built+proved ${item.call} in ${Math.round((Date.now() - t0) / 1000)}s`);
